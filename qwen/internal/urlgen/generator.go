@@ -63,12 +63,8 @@ func (g *Generator) Generate(baseURL string, existingParams []string, allParams 
 	chunks := chunkSlice(paramsToTest, g.MaxParams)
 
 	// 3. CRITICAL: Iterate through EVERY PAYLOAD
-	// For each payload, we generate a set of URLs for the chunks.
 	for _, payload := range g.Payloads {
 		
-		// If the chunk list is empty (e.g., parameterless URL in 'ignore' mode), 
-		// we still want to test the payload on the base URL if possible, 
-		// but usually 'ignore' implies we add params. If no params exist to add, we skip.
 		if len(chunks) == 0 {
 			continue
 		}
@@ -79,12 +75,11 @@ func (g *Generator) Generate(baseURL string, existingParams []string, allParams 
 
 			// Apply the payload to the parameters in this chunk
 			for _, param := range chunk {
-				// Check if this param already existed in the URL
+				// FIXED: Removed the unused 'isExisting' variable.
+				// We just grab the original value if it exists. If it doesn't, originalVal stays "".
 				originalVal := ""
-				isExisting := false
 				for _, ep := range existingParams {
 					if param == ep {
-						isExisting = true
 						originalVal = u.Query().Get(ep)
 						break
 					}
@@ -102,7 +97,6 @@ func (g *Generator) Generate(baseURL string, existingParams []string, allParams 
 
 				// Set the value. 
 				// Note: url.Values.Set automatically URL-encodes special chars like " and <
-				// This is required for a valid HTTP request.
 				q.Set(param, finalValue)
 			}
 
