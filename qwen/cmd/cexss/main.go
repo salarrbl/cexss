@@ -4,13 +4,10 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/salarrbl/cexss/internal/collector"
 	"github.com/salarrbl/cexss/internal/param"
@@ -70,9 +67,6 @@ func main() {
 		singleTarget = flag.Arg(0)
 	}
 
-	// DEBUG: Prove we captured the target correctly
-	logger.Info("DEBUG: Target captured as: '%s'", singleTarget)
-
 	inputChan := getInputChannel(singleTarget, *fileFlag)
 
 	if *ucMode {
@@ -109,7 +103,6 @@ func main() {
 		
 		if *psMode {
 			logger.Info("Chaining Parameter Search (-ps)...")
-			// Create a FRESH input channel for the parameter search
 			psInputChan := getInputChannel(singleTarget, *fileFlag)
 			processParameterDiscovery(psInputChan, *wordlistFlag)
 		}
@@ -192,7 +185,6 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 		logger.Success("Instantly discovered %d unique parameters from file for %s. Saved to %s", len(allParams), domain, paramsFile)
 	}
 }
-// ... [Keep processPipeline, filterExistingDomains, initDomainFiles, sanitizeDomain, getInputChannel, readFile, readStdin, readLinesFromFile, writeLinesToFile, mapKeysToSlice EXACTLY as they were in the previous full file] ...
 
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Processing URLs...")
