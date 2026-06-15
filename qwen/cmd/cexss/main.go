@@ -23,10 +23,10 @@ type DomainWriter struct {
 }
 
 func main() {
+	// 1. Define Flags (Removed -w)
 	ucMode := flag.Bool("uc", false, "Enable URL Collection mode (runs Wayback, Katana)")
 	fuMode := flag.Bool("fu", false, "Filter URLs. If used alone, filters existing files in ./tmp/")
 	psMode := flag.Bool("ps", false, "Parameter Search: discover parameters from filtered URLs")
-	wordlistFlag := flag.String("w", "", "Path to a custom wordlist for parameter brute-forcing")
 	fileFlag := flag.String("f", "", "File containing target URLs or Domains")
 	
 	flag.Usage = func() {
@@ -46,7 +46,6 @@ func main() {
 		fmt.Printf("  %s%-4s%s  %s\n", Green, "-uc", Reset, "Enable URL Collection mode (runs Wayback, Katana)")
 		fmt.Printf("  %s%-4s%s  %s\n", Green, "-fu", Reset, "Filter URLs (remove static assets)")
 		fmt.Printf("  %s%-4s%s  %s\n", Green, "-ps", Reset, "Parameter Search: discover parameters from URLs")
-		fmt.Printf("  %s%-4s%s  %s\n", Green, "-w", Reset, "Path to a custom wordlist for parameter brute-forcing")
 		fmt.Printf("  %s%-4s%s  %s\n", Green, "-f", Reset, "File containing target URLs or Domains")
 		fmt.Printf("  %s%-4s%s  %s\n\n", Green, "-h", Reset, "Show this help message and exit")
 		fmt.Printf("%s%sEXAMPLES:%s\n", Bold, Blue, Reset)
@@ -69,6 +68,7 @@ func main() {
 
 	inputChan := getInputChannel(singleTarget, *fileFlag)
 
+	// --- ROUTING LOGIC ---
 	if *ucMode {
 		logger.Info("URL Collection mode (-uc) enabled.")
 		urlChan := make(chan collector.CollectedURL, 100)
@@ -104,7 +104,7 @@ func main() {
 		if *psMode {
 			logger.Info("Chaining Parameter Search (-ps)...")
 			psInputChan := getInputChannel(singleTarget, *fileFlag)
-			processParameterDiscovery(psInputChan, *wordlistFlag)
+			processParameterDiscovery(psInputChan) // Removed wordlist argument
 		}
 
 	} else if *fuMode {
@@ -115,7 +115,7 @@ func main() {
 
 	} else if *psMode {
 		logger.Info("Parameter Search mode (-ps) enabled. Reading existing filtered URLs...")
-		processParameterDiscovery(getInputChannel(singleTarget, *fileFlag), *wordlistFlag)
+		processParameterDiscovery(getInputChannel(singleTarget, *fileFlag)) // Removed wordlist argument
 		return
 
 	} else {
@@ -131,8 +131,8 @@ func main() {
 	}
 }
 
-// processParameterDiscovery: PURELY OFFLINE. Reads existing files, extracts URL params, NO network requests.
-func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
+// processParameterDiscovery: PURELY OFFLINE. Reads existing files, extracts URL params.
+func processParameterDiscovery(inputChan <-chan string) { // Removed wordlistPath parameter
 	discoverer := param.NewDiscoverer()
 
 	for domain := range inputChan {
@@ -162,15 +162,13 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 		allParams := make(map[string]struct{})
 		
 		for _, u := range urls {
-			// Ensure it has a scheme so url.Parse works correctly
 			if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 				u = "http://" + u
 			}
 
-			// Extract query parameters directly from the URL string
 			params := discoverer.ExtractFromURL(u)
 			for _, p := range params {
-				allParams[p] = struct{}{} // Map automatically deduplicates
+				allParams[p] = struct{}{} 
 			}
 		}
 
@@ -185,6 +183,8 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 		logger.Success("Instantly discovered %d unique parameters from file for %s. Saved to %s", len(allParams), domain, paramsFile)
 	}
 }
+
+// ... [Keep processPipeline, filterExistingDomains, initDomainFiles, sanitizeDomain, getInputChannel, readFile, readStdin, readLinesFromFile, writeLinesToFile, mapKeysToSlice EXACTLY as they were] ...
 
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Processing URLs...")
