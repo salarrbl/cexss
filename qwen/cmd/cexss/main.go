@@ -208,7 +208,9 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 
 	for res := range urlChan {
 		url := strings.TrimSpace(res.URL)
-		if url == "" { continue }
+		if url == "" {
+			continue
+		}
 		totalProcessed++
 
 		safeDomain := sanitizeDomain(res.Domain)
@@ -218,22 +220,38 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 			writers[safeDomain] = dw
 		}
 
-		if res.Source == "wayback" && dw.Wayback != nil { fmt.Fprintln(dw.Wayback, url) } 
-		else if res.Source == "katana" && dw.Katana != nil { fmt.Fprintln(dw.Katana, url) }
-
-		if dw.All != nil { fmt.Fprintln(dw.All, url) }
-
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") { url = "http://" + url }
-
-		if shouldFilter {
-			if filter.IsStaticResource(url) { filteredOut++; continue }
+		// FIXED: Multi-line if/else blocks to satisfy Go's syntax rules
+		if res.Source == "wayback" && dw.Wayback != nil {
+			fmt.Fprintln(dw.Wayback, url)
+		} else if res.Source == "katana" && dw.Katana != nil {
+			fmt.Fprintln(dw.Katana, url)
 		}
 
-		if _, exists := seenFiltered[url]; exists { continue }
+		if dw.All != nil {
+			fmt.Fprintln(dw.All, url)
+		}
+
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			url = "http://" + url
+		}
+
+		if shouldFilter {
+			if filter.IsStaticResource(url) {
+				filteredOut++
+				continue
+			}
+		}
+
+		if _, exists := seenFiltered[url]; exists {
+			continue
+		}
 
 		seenFiltered[url] = struct{}{}
 		savedUnique++
-		if dw.Filtered != nil { fmt.Fprintln(dw.Filtered, url) }
+		
+		if dw.Filtered != nil {
+			fmt.Fprintln(dw.Filtered, url)
+		}
 	}
 
 	for _, dw := range writers {
