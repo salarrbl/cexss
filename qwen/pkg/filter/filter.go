@@ -11,7 +11,7 @@ var BlacklistedExtensions = []string{
 	".pdf", ".doc", ".exe", ".zip", ".xml", ".woff", ".woff2", ".ttf", ".otf", ".ico",
 	".bmp", ".eot", ".flv", ".webm", ".webp", ".ppt", ".pptx", ".scss", ".tif", ".tiff",
 	".m4a", ".m4p", ".fnt", ".ogg", ".ogv", ".wmv", ".mov", ".rtf", ".swf", ".htc",
-	".image", ".rf", ".txt", ".msi",".jpg%5C",".jpeg%5C",
+	".image", ".rf", ".txt", ".msi",".jpg%5C",".jpeg%5C", ".jpg\\",".jpeg\\",".png\\"
 }
 
 // BlacklistedSuffixes handles your specific request for hyphenated image names 
