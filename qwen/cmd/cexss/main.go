@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/salarrbl/cexss/internal/collector"
 	"github.com/salarrbl/cexss/internal/param"
@@ -23,7 +26,6 @@ type DomainWriter struct {
 }
 
 func main() {
-	// 1. Define Flags
 	ucMode := flag.Bool("uc", false, "Enable URL Collection mode (runs Wayback, Katana)")
 	fuMode := flag.Bool("fu", false, "Filter URLs. If used alone, filters existing files in ./tmp/")
 	psMode := flag.Bool("ps", false, "Parameter Search: discover parameters from filtered URLs")
@@ -70,8 +72,6 @@ func main() {
 
 	inputChan := getInputChannel(singleTarget, *fileFlag)
 
-	// --- ROUTING LOGIC ---
-	
 	if *ucMode {
 		logger.Info("URL Collection mode (-uc) enabled.")
 		urlChan := make(chan collector.CollectedURL, 100)
@@ -104,7 +104,6 @@ func main() {
 
 		processPipeline(urlChan, *fuMode)
 		
-		// If -ps is also provided, run parameter discovery immediately after!
 		if *psMode {
 			logger.Info("Chaining Parameter Search (-ps)...")
 			processParameterDiscovery(inputChan, *wordlistFlag)
@@ -117,7 +116,6 @@ func main() {
 		return
 
 	} else if *psMode {
-		// NEW MODE: Parameter Discovery
 		logger.Info("Parameter Search mode (-ps) enabled. Reading filtered URLs...")
 		processParameterDiscovery(inputChan, *wordlistFlag)
 		return
@@ -135,7 +133,6 @@ func main() {
 	}
 }
 
-// processParameterDiscovery reads filtered.txt, deduplicates paths, and extracts params.
 // processParameterDiscovery reads filtered.txt, deduplicates paths, fetches HTML, and extracts params.
 func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 	discoverer := param.NewDiscoverer()
@@ -165,7 +162,7 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 				continue
 			}
 			logger.Warning("filtered.txt not found. Falling back to all.txt for %s", domain)
-	ZX	}
+		}
 		logger.Info("Loaded %d URLs for %s", len(urls), domain)
 
 		// 2. THE SPEED SECRET: Get Unique Paths
@@ -177,7 +174,6 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 		fetchedCount := 0
 
 		for _, u := range uniqueURLs {
-			// Ensure it's a valid HTTP/HTTPS URL before fetching
 			if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 				u = "https://" + u
 			}
@@ -194,10 +190,8 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 				continue // Skip if the page is dead or times out
 			}
 			
-			// We only care about HTML pages, not images/PDFs (double-check)
 			contentType := resp.Header.Get("Content-Type")
 			if strings.Contains(contentType, "text/html") {
-				// Read the body
 				bodyBytes, readErr := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				
@@ -213,8 +207,6 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 			}
 		}
 
-		// TODO: In the next step, we will add Wordlist brute-forcing here!
-
 		// 4. Save discovered parameters to params.txt
 		paramsFile := filepath.Join(dir, "params.txt")
 		err = writeLinesToFile(paramsFile, mapKeysToSlice(allParams))
@@ -226,7 +218,6 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 		logger.Success("Discovered %d unique parameters for %s (Fetched %d pages). Saved to %s", len(allParams), domain, fetchedCount, paramsFile)
 	}
 }
-// --- Existing Pipeline Functions (Unchanged) ---
 
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Processing URLs...")
@@ -244,9 +235,7 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 
 	for res := range urlChan {
 		url := strings.TrimSpace(res.URL)
-		if url == "" {
-			continue
-		}
+		if url == "" { continue }
 		totalProcessed++
 
 		safeDomain := sanitizeDomain(res.Domain)
@@ -256,7 +245,6 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 			writers[safeDomain] = dw
 		}
 
-		// FIXED: Multi-line if/else blocks to satisfy Go's syntax rules
 		if res.Source == "wayback" && dw.Wayback != nil {
 			fmt.Fprintln(dw.Wayback, url)
 		} else if res.Source == "katana" && dw.Katana != nil {
@@ -346,7 +334,9 @@ func filterExistingDomains(inputChan <-chan string) {
 			if rawURL == "" { continue }
 			countTotal++
 
-			if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") { rawURL = "http://" + rawURL }
+			if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+				rawURL = "http://" + rawURL
+			}
 			if _, exists := seen[rawURL]; exists { continue }
 			if filter.IsStaticResource(rawURL) { continue }
 
@@ -360,8 +350,6 @@ func filterExistingDomains(inputChan <-chan string) {
 		logger.Success("Filtered %s: %d total -> %d valid URLs", domain, countTotal, countFiltered)
 	}
 }
-
-// --- Helper Functions ---
 
 func initDomainFiles(domain string) *DomainWriter {
 	dir := filepath.Join("tmp", domain)
@@ -399,15 +387,19 @@ func readFile(path string, out chan<- string) {
 	if err != nil { logger.Error("Could not open file: %v", err); return }
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
-	for scanner.Scan() { line := scanner.Text(); if line != "" { out <- line } }
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" { out <- line }
+	}
 }
 
 func readStdin(out chan<- string) {
 	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() { line := scanner.Text(); if line != "" { out <- line } }
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" { out <- line }
+	}
 }
-
-// --- NEW Helper Functions for Parameter Discovery ---
 
 func readLinesFromFile(path string) ([]string, error) {
 	file, err := os.Open(path)
