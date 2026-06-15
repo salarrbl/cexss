@@ -17,7 +17,7 @@ var BlacklistedExtensions = []string{
 // BlacklistedSuffixes handles your specific request for hyphenated image names 
 // (e.g., "thumbnail-800x600-jpg").
 var BlacklistedSuffixes = []string{
-	"-jpg", "-jpeg", "-png", "-gif",".jpg%5C",".jpeg%5C", ".png%5C"
+	"-jpg", "-jpeg", "-png", "-gif",".jpg%5C",".jpeg%5C", ".png%5C",
 }
 
 // IsStaticResource checks if the URL points to a file type we don't want to scan.
