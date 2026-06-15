@@ -54,14 +54,22 @@ func main() {
 		fmt.Printf("  %s%-14s%s %s\n\n", Green, "-nuclei", Reset, "Run Nuclei scan on generated URLs")
 	}
 
-	if len(os.Args) == 1 { flag.Usage(); os.Exit(0) }
+	if len(os.Args) == 1 {
+		flag.Usage()
+		os.Exit(0)
+	}
 	flag.Parse()
 
 	singleTarget := ""
-	if flag.NArg() > 0 { singleTarget = flag.Arg(0) }
+	if flag.NArg() > 0 {
+		singleTarget = flag.Arg(0)
+	}
 
 	targets := getTargets(singleTarget, *fileFlag)
-	if len(targets) == 0 { logger.Error("No targets."); os.Exit(1) }
+	if len(targets) == 0 {
+		logger.Error("No targets.")
+		os.Exit(1)
+	}
 
 	payloads := loadPayloads()
 
@@ -72,18 +80,34 @@ func main() {
 			var wg sync.WaitGroup
 			seen := make(map[string]struct{})
 			for _, d := range targets {
-				if _, ok := seen[d]; ok { continue }
+				if _, ok := seen[d]; ok {
+					continue
+				}
 				seen[d] = struct{}{}
 				wg.Add(2)
-				go func(d string) { defer wg.Done(); collector.NewWaybackCollector().Fetch(d, urlChan) }(d)
-				go func(d string) { defer wg.Done(); collector.NewKatanaCollector().Fetch(d, urlChan) }(d)
+				go func(d string) {
+					defer wg.Done()
+					collector.NewWaybackCollector().Fetch(d, urlChan)
+				}(d)
+				go func(d string) {
+					defer wg.Done()
+					collector.NewKatanaCollector().Fetch(d, urlChan)
+				}(d)
 			}
-			wg.Wait(); close(urlChan)
+			wg.Wait()
+			close(urlChan)
 		}()
+		
 		processPipeline(urlChan, *fuMode)
-		if *psMode { processParameterDiscovery(targets) }
-		if *ugMode { processURLGeneration(targets, *strategyFlag, *strategyValueFlag, payloads) }
-		if *nucleiFlag && *ugMode { runNuclei(targets, *templateFlag) }
+		if *psMode {
+			processParameterDiscovery(targets)
+		}
+		if *ugMode {
+			processURLGeneration(targets, *strategyFlag, *strategyValueFlag, payloads)
+		}
+		if *nucleiFlag && *ugMode {
+			runNuclei(targets, *templateFlag)
+		}
 
 	} else if *fuMode {
 		filterExistingDomains(targets)
@@ -91,11 +115,15 @@ func main() {
 		processParameterDiscovery(targets)
 	} else if *ugMode {
 		processURLGeneration(targets, *strategyFlag, *strategyValueFlag, payloads)
-		if *nucleiFlag { runNuclei(targets, *templateFlag) }
+		if *nucleiFlag {
+			runNuclei(targets, *templateFlag)
+		}
 	} else {
 		urlChan := make(chan collector.CollectedURL, 100)
 		go func() {
-			for _, u := range targets { urlChan <- collector.CollectedURL{URL: u, Source: "stdin", Domain: "default"} }
+			for _, u := range targets {
+				urlChan <- collector.CollectedURL{URL: u, Source: "stdin", Domain: "default"}
+			}
 			close(urlChan)
 		}()
 		processPipeline(urlChan, false)
@@ -106,19 +134,20 @@ func loadPayloads() []string {
 	lines, err := readLinesFromFile("payloads/payloads.txt")
 	if err != nil {
 		logger.Warning("Could not load payloads/payloads.txt: %v", err)
-		return []string{"cexss"} // Fallback
+		return []string{"cexss"}
 	}
 	var clean []string
 	for _, l := range lines {
 		l = strings.TrimSpace(l)
-		if l != "" && !strings.HasPrefix(l, "#") { clean = append(clean, l) }
+		if l != "" && !strings.HasPrefix(l, "#") {
+			clean = append(clean, l)
+		}
 	}
 	logger.Info("Loaded %d custom payloads.", len(clean))
 	return clean
 }
 
 func processURLGeneration(targets []string, strategy, mutationMode string, payloads []string) {
-	// MaxParams is strictly 25 as per your requirement
 	generator := urlgen.NewGenerator(25, payloads, mutationMode)
 
 	for _, domain := range targets {
@@ -144,10 +173,10 @@ func processURLGeneration(targets []string, strategy, mutationMode string, paylo
 		totalGenerated := 0
 
 		for _, u := range urls {
-			if !strings.HasPrefix(u, "http") { u = "http://" + u }
+			if !strings.HasPrefix(u, "http") {
+				u = "http://" + u
+			}
 			existingParams := urlgen.GetExistingParams(u)
-			
-			// Generate URLs: (Chunks) x (Payloads)
 			generated := generator.Generate(u, existingParams, allParams, strategy)
 			
 			for _, genURL := range generated {
@@ -164,7 +193,6 @@ func processURLGeneration(targets []string, strategy, mutationMode string, paylo
 func runNuclei(targets []string, templatePath string) {
 	logger.Info("Starting Nuclei Scan with template: %s", templatePath)
 	
-	// Verify template exists
 	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
 		logger.Error("Template not found at %s. Please create it.", templatePath)
 		return
@@ -173,15 +201,16 @@ func runNuclei(targets []string, templatePath string) {
 	var allXamirFiles []string
 	for _, domain := range targets {
 		path := filepath.Join("tmp", sanitizeDomain(domain), "xamir.txt")
-		if _, err := os.Stat(path); err == nil { allXamirFiles = append(allXamirFiles, path) }
+		if _, err := os.Stat(path); err == nil {
+			allXamirFiles = append(allXamirFiles, path)
+		}
 	}
 
-	if len(allXamirFiles) == 0 { logger.Error("No xamir.txt files found."); return }
+	if len(allXamirFiles) == 0 {
+		logger.Error("No xamir.txt files found.")
+		return
+	}
 
-	// Nuclei Command:
-	// -l - : Read URLs from stdin
-	// -t : Use your specific template
-	// -silent : Clean output
 	cmd := exec.Command("nuclei", "-l", "-", "-t", templatePath, "-silent")
 	
 	stdin, _ := cmd.StdinPipe()
@@ -193,7 +222,6 @@ func runNuclei(targets []string, templatePath string) {
 		return
 	}
 
-	// Stream URLs to Nuclei
 	for _, file := range allXamirFiles {
 		lines, _ := readLinesFromFile(file)
 		for _, line := range lines {
@@ -208,8 +236,6 @@ func runNuclei(targets []string, templatePath string) {
 		logger.Success("Nuclei scan completed.")
 	}
 }
-
-// ... [Keep processParameterDiscovery, sortParamsByFrequency, writeParamsToFile, processPipeline, filterExistingDomains, initDomainFiles, sanitizeDomain, getTargets, readLinesFromFile, loadWordlists, mapKeysToSlice EXACTLY as they were in the previous step] ...
 
 func processParameterDiscovery(targets []string) {
 	discoverer := param.NewDiscoverer()
@@ -227,18 +253,29 @@ func processParameterDiscovery(targets []string) {
 		if err != nil {
 			allFile := filepath.Join(dir, "all.txt")
 			urls, err = readLinesFromFile(allFile)
-			if err != nil { logger.Error("Could not read URLs for %s: %v", domain, err); continue }
+			if err != nil {
+				logger.Error("Could not read URLs for %s: %v", domain, err)
+				continue
+			}
 		}
 		
 		paramFrequency := make(map[string]int)
 		for _, u := range urls {
-			if !strings.HasPrefix(u, "http") { u = "http://" + u }
+			if !strings.HasPrefix(u, "http") {
+				u = "http://" + u
+			}
 			params := discoverer.ExtractFromURL(u)
-			for _, p := range params { paramFrequency[p]++; globalParams[p]++ }
+			for _, p := range params {
+				paramFrequency[p]++
+				globalParams[p]++
+			}
 		}
 
 		for _, wp := range wordlistParams {
-			if _, exists := paramFrequency[wp]; !exists { paramFrequency[wp] = 0; globalParams[wp] = 0 }
+			if _, exists := paramFrequency[wp]; !exists {
+				paramFrequency[wp] = 0
+				globalParams[wp] = 0
+			}
 		}
 
 		sortedParams := sortParamsByFrequency(paramFrequency)
@@ -246,14 +283,22 @@ func processParameterDiscovery(targets []string) {
 		writeParamsToFile(paramsFile, sortedParams)
 
 		topN := 5
-		if len(sortedParams) < topN { topN = len(sortedParams) }
+		if len(sortedParams) < topN {
+			topN = len(sortedParams)
+		}
 		topList := ""
-		for i := 0; i < topN; i++ { topList += fmt.Sprintf("%s(%d) ", sortedParams[i].Name, sortedParams[i].Count) }
+		for i := 0; i < topN; i++ {
+			topList += fmt.Sprintf("%s(%d) ", sortedParams[i].Name, sortedParams[i].Count)
+		}
 		logger.Success("Discovered %d total params for %s. Top %d: %s", len(sortedParams), domain, topN, topList)
 	}
 
 	if len(targets) > 1 {
-		for _, wp := range wordlistParams { if _, exists := globalParams[wp]; !exists { globalParams[wp] = 0 } }
+		for _, wp := range wordlistParams {
+			if _, exists := globalParams[wp]; !exists {
+				globalParams[wp] = 0
+			}
+		}
 		sortedGlobal := sortParamsByFrequency(globalParams)
 		globalFile := filepath.Join("tmp", "global_params.txt")
 		writeParamsToFile(globalFile, sortedGlobal)
@@ -263,22 +308,35 @@ func processParameterDiscovery(targets []string) {
 
 func sortParamsByFrequency(m map[string]int) []ParamCount {
 	var sorted []ParamCount
-	for k, v := range m { sorted = append(sorted, ParamCount{Name: k, Count: v}) }
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Count > sorted[j].Count })
+	for k, v := range m {
+		sorted = append(sorted, ParamCount{Name: k, Count: v})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Count > sorted[j].Count
+	})
 	return sorted
 }
 
 func writeParamsToFile(path string, params []ParamCount) error {
 	file, err := os.Create(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer file.Close()
-	for _, p := range params { fmt.Fprintln(file, p.Name) }
+	for _, p := range params {
+		fmt.Fprintln(file, p.Name)
+	}
 	return nil
 }
 
+// FIXED: Expanded all if/else blocks to multiple lines to satisfy Go's strict syntax rules.
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Processing URLs...")
-	if shouldFilter { logger.Info("Filter mode (-fu) is ENABLED.") } else { logger.Warning("Filter mode (-fu) is DISABLED.") }
+	if shouldFilter {
+		logger.Info("Filter mode (-fu) is ENABLED.")
+	} else {
+		logger.Warning("Filter mode (-fu) is DISABLED.")
+	}
 	
 	writers := make(map[string]*DomainWriter)
 	seenFiltered := make(map[string]struct{})
@@ -286,27 +344,50 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 
 	for res := range urlChan {
 		url := strings.TrimSpace(res.URL)
-		if url == "" { continue }
+		if url == "" {
+			continue
+		}
 		totalProcessed++
 
 		safeDomain := sanitizeDomain(res.Domain)
 		dw, exists := writers[safeDomain]
-		if !exists { dw = initDomainFiles(safeDomain); writers[safeDomain] = dw }
+		if !exists {
+			dw = initDomainFiles(safeDomain)
+			writers[safeDomain] = dw
+		}
 
-		if res.Source == "wayback" && dw.Wayback != nil { fmt.Fprintln(dw.Wayback, url) } 
-		else if res.Source == "katana" && dw.Katana != nil { fmt.Fprintln(dw.Katana, url) }
-		if dw.All != nil { fmt.Fprintln(dw.All, url) }
+		// FIXED: Expanded to multiple lines
+		if res.Source == "wayback" && dw.Wayback != nil {
+			fmt.Fprintln(dw.Wayback, url)
+		} else if res.Source == "katana" && dw.Katana != nil {
+			fmt.Fprintln(dw.Katana, url)
+		}
 
-		if !strings.HasPrefix(url, "http") { url = "http://" + url }
+		if dw.All != nil {
+			fmt.Fprintln(dw.All, url)
+		}
+
+		if !strings.HasPrefix(url, "http") {
+			url = "http://" + url
+		}
 
 		if shouldFilter {
-			if filter.IsStaticResource(url) { filteredOut++; continue }
+			if filter.IsStaticResource(url) {
+				filteredOut++
+				continue
+			}
 		}
-		if _, exists := seenFiltered[url]; exists { continue }
+		
+		if _, exists := seenFiltered[url]; exists {
+			continue
+		}
 
 		seenFiltered[url] = struct{}{}
 		savedUnique++
-		if dw.Filtered != nil { fmt.Fprintln(dw.Filtered, url) }
+		
+		if dw.Filtered != nil {
+			fmt.Fprintln(dw.Filtered, url)
+		}
 	}
 
 	for _, dw := range writers {
@@ -328,11 +409,17 @@ func filterExistingDomains(targets []string) {
 	for _, domain := range targets {
 		safeDomain := sanitizeDomain(domain)
 		dir := filepath.Join("tmp", safeDomain)
-		if _, err := os.Stat(dir); os.IsNotExist(err) { logger.Error("Dir not found: %s", dir); continue }
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			logger.Error("Dir not found: %s", dir)
+			continue
+		}
 		logger.Info("Filtering existing URLs for %s...", domain)
 		
 		inFile, err := os.Open(filepath.Join(dir, "all.txt"))
-		if err != nil { logger.Error("Could not open all.txt: %v", err); continue }
+		if err != nil {
+			logger.Error("Could not open all.txt: %v", err)
+			continue
+		}
 		
 		outFile, _ := os.Create(filepath.Join(dir, "filtered.txt"))
 		seen := make(map[string]struct{})
@@ -341,17 +428,26 @@ func filterExistingDomains(targets []string) {
 
 		for scanner.Scan() {
 			rawURL := strings.TrimSpace(scanner.Text())
-			if rawURL == "" { continue }
+			if rawURL == "" {
+				continue
+			}
 			countTotal++
-			if !strings.HasPrefix(rawURL, "http") { rawURL = "http://" + rawURL }
-			if _, exists := seen[rawURL]; exists { continue }
-			if filter.IsStaticResource(rawURL) { continue }
+			if !strings.HasPrefix(rawURL, "http") {
+				rawURL = "http://" + rawURL
+			}
+			if _, exists := seen[rawURL]; exists {
+				continue
+			}
+			if filter.IsStaticResource(rawURL) {
+				continue
+			}
 
 			seen[rawURL] = struct{}{}
 			fmt.Fprintln(outFile, rawURL)
 			countFiltered++
 		}
-		inFile.Close(); outFile.Close()
+		inFile.Close()
+		outFile.Close()
 		logger.Success("Filtered %s: %d total -> %d valid URLs", domain, countTotal, countFiltered)
 	}
 }
@@ -380,31 +476,48 @@ func getTargets(singleTarget, filePath string) []string {
 	seen := make(map[string]struct{})
 	addTarget := func(t string) {
 		t = strings.TrimSpace(t)
-		if t == "" { return }
-		if _, exists := seen[t]; !exists { seen[t] = struct{}{}; targets = append(targets, t) }
+		if t == "" {
+			return
+		}
+		if _, exists := seen[t]; !exists {
+			seen[t] = struct{}{}
+			targets = append(targets, t)
+		}
 	}
-	if singleTarget != "" { addTarget(singleTarget) }
+	if singleTarget != "" {
+		addTarget(singleTarget)
+	}
 	if filePath != "" {
 		lines, err := readLinesFromFile(filePath)
-		if err == nil { for _, line := range lines { addTarget(line) } }
+		if err == nil {
+			for _, line := range lines {
+				addTarget(line)
+			}
+		}
 	}
 	stat, _ := os.Stdin.Stat()
 	if (stat.Mode() & os.ModeCharDevice) == 0 {
 		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() { addTarget(scanner.Text()) }
+		for scanner.Scan() {
+			addTarget(scanner.Text())
+		}
 	}
 	return targets
 }
 
 func readLinesFromFile(path string) ([]string, error) {
 	file, err := os.Open(path)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer file.Close()
 	var lines []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line != "" { lines = append(lines, line) }
+		if line != "" {
+			lines = append(lines, line)
+		}
 	}
 	return lines, scanner.Err()
 }
@@ -415,11 +528,18 @@ func loadWordlists() []string {
 	files := []string{"wordlists/params", "wordlists/top-xss-parameter.txt"}
 	for _, file := range files {
 		lines, err := readLinesFromFile(file)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") { continue }
-			if _, exists := seen[line]; !exists { seen[line] = struct{}{}; words = append(words, line) }
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if _, exists := seen[line]; !exists {
+				seen[line] = struct{}{}
+				words = append(words, line)
+			}
 		}
 	}
 	return words
@@ -427,6 +547,8 @@ func loadWordlists() []string {
 
 func mapKeysToSlice(m map[string]struct{}) []string {
 	var slice []string
-	for k := range m { slice = append(slice, k) }
+	for k := range m {
+		slice = append(slice, k)
+	}
 	return slice
 }

@@ -23,3 +23,5 @@ key
 login
 begindate
 enddate
+redirect_uri
+currentURL
