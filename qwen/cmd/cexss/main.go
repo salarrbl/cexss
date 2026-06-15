@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/salarrbl/cexss/internal/collector"
+	"github.com/salarrbl/cexss/internal/param"
 	"github.com/salarrbl/cexss/pkg/filter"
 	"github.com/salarrbl/cexss/pkg/logger"
 )
@@ -22,8 +23,11 @@ type DomainWriter struct {
 }
 
 func main() {
+	// 1. Define Flags
 	ucMode := flag.Bool("uc", false, "Enable URL Collection mode (runs Wayback, Katana)")
 	fuMode := flag.Bool("fu", false, "Filter URLs. If used alone, filters existing files in ./tmp/")
+	psMode := flag.Bool("ps", false, "Parameter Search: discover parameters from filtered URLs")
+	wordlistFlag := flag.String("w", "", "Path to a custom wordlist for parameter brute-forcing")
 	fileFlag := flag.String("f", "", "File containing target URLs or Domains")
 	
 	flag.Usage = func() {
@@ -41,13 +45,15 @@ func main() {
 		fmt.Printf("  cexss [flags] [target]\n\n")
 		fmt.Printf("%s%sFLAGS:%s\n", Bold, Blue, Reset)
 		fmt.Printf("  %s%-4s%s  %s\n", Green, "-uc", Reset, "Enable URL Collection mode (runs Wayback, Katana)")
-		fmt.Printf("  %s%-4s%s  %s\n", Green, "-fu", Reset, "Filter URLs (remove static assets). Filters ./tmp/ if used alone")
+		fmt.Printf("  %s%-4s%s  %s\n", Green, "-fu", Reset, "Filter URLs (remove static assets)")
+		fmt.Printf("  %s%-4s%s  %s\n", Green, "-ps", Reset, "Parameter Search: discover parameters from URLs")
+		fmt.Printf("  %s%-4s%s  %s\n", Green, "-w", Reset, "Path to a custom wordlist for parameter brute-forcing")
 		fmt.Printf("  %s%-4s%s  %s\n", Green, "-f", Reset, "File containing target URLs or Domains")
 		fmt.Printf("  %s%-4s%s  %s\n\n", Green, "-h", Reset, "Show this help message and exit")
 		fmt.Printf("%s%sEXAMPLES:%s\n", Bold, Blue, Reset)
 		fmt.Printf("  %s▶%s cexss -uc -fu example.com\n", Yellow, Reset)
-		fmt.Printf("  %s▶%s cexss -fu example.com\n", Yellow, Reset)
-		fmt.Printf("  %s▶%s cat domains.txt | cexss -uc -fu\n\n", Yellow, Reset)
+		fmt.Printf("  %s▶%s cexss -ps example.com\n", Yellow, Reset)
+		fmt.Printf("  %s▶%s cexss -uc -fu -ps example.com\n\n", Yellow, Reset)
 	}
 
 	if len(os.Args) == 1 {
@@ -64,6 +70,8 @@ func main() {
 
 	inputChan := getInputChannel(singleTarget, *fileFlag)
 
+	// --- ROUTING LOGIC ---
+	
 	if *ucMode {
 		logger.Info("URL Collection mode (-uc) enabled.")
 		urlChan := make(chan collector.CollectedURL, 100)
@@ -95,11 +103,23 @@ func main() {
 		}()
 
 		processPipeline(urlChan, *fuMode)
+		
+		// If -ps is also provided, run parameter discovery immediately after!
+		if *psMode {
+			logger.Info("Chaining Parameter Search (-ps)...")
+			processParameterDiscovery(inputChan, *wordlistFlag)
+		}
 
 	} else if *fuMode {
-		logger.Info("Filter mode (-fu) enabled without collection. Filtering existing files in ./tmp/...")
+		logger.Info("Filter mode (-fu) enabled without collection.")
 		filterExistingDomains(inputChan)
 		logger.Success("Filtering finished.")
+		return
+
+	} else if *psMode {
+		// NEW MODE: Parameter Discovery
+		logger.Info("Parameter Search mode (-ps) enabled. Reading filtered URLs...")
+		processParameterDiscovery(inputChan, *wordlistFlag)
 		return
 
 	} else {
@@ -115,7 +135,63 @@ func main() {
 	}
 }
 
-// processPipeline now includes EXPLICIT STATISTICS to prove filtering is working.
+// processParameterDiscovery reads filtered.txt, deduplicates paths, and extracts params.
+func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
+	discoverer := param.NewDiscoverer()
+
+	for domain := range inputChan {
+		domain = strings.TrimSpace(domain)
+		if domain == "" { continue }
+
+		safeDomain := sanitizeDomain(domain)
+		dir := filepath.Join("tmp", safeDomain)
+		
+		logger.Info("Starting Parameter Discovery for %s...", domain)
+
+		// 1. Try to read filtered.txt. If it doesn't exist, fallback to all.txt.
+		filteredFile := filepath.Join(dir, "filtered.txt")
+		urls, err := readLinesFromFile(filteredFile)
+		if err != nil {
+			allFile := filepath.Join(dir, "all.txt")
+			urls, err = readLinesFromFile(allFile)
+			if err != nil {
+				logger.Error("Could not read URLs for %s: %v (Did you run -uc first?)", domain, err)
+				continue
+			}
+			logger.Warning("filtered.txt not found. Falling back to all.txt for %s", domain)
+		}
+		logger.Info("Loaded %d URLs for %s", len(urls), domain)
+
+		// 2. THE SPEED SECRET: Get Unique Paths
+		uniqueURLs := param.GetUniquePaths(urls)
+		logger.Info("Found %d unique paths. This saves us %d network requests!", len(uniqueURLs), len(urls)-len(uniqueURLs))
+
+		// 3. Extract existing parameters from the URLs themselves
+		allParams := make(map[string]struct{})
+		for _, u := range uniqueURLs {
+			params := discoverer.ExtractFromURL(u)
+			for _, p := range params {
+				allParams[p] = struct{}{} // Deduplicate parameters
+			}
+		}
+
+		// TODO: In the next steps, we will add HTML Form parsing, JS parsing, 
+		// and Wordlist brute-forcing right here!
+
+		// 4. Save discovered parameters to params.txt
+		paramsFile := filepath.Join(dir, "params.txt")
+		err = writeLinesToFile(paramsFile, mapKeysToSlice(allParams))
+		if err != nil {
+			logger.Error("Could not save params for %s: %v", domain, err)
+			continue
+		}
+
+		logger.Success("Discovered %d unique parameters for %s. Saved to %s", len(allParams), domain, paramsFile)
+	}
+}
+
+// --- Existing Pipeline Functions (Unchanged) ---
+
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Processing URLs...")
 	if shouldFilter {
@@ -126,8 +202,6 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	
 	writers := make(map[string]*DomainWriter)
 	seenFiltered := make(map[string]struct{})
-	
-	// Statistics counters
 	totalProcessed := 0
 	filteredOut := 0
 	savedUnique := 0
@@ -144,46 +218,24 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 			writers[safeDomain] = dw
 		}
 
-		// 1. Save to raw tool-specific files
-		if res.Source == "wayback" && dw.Wayback != nil {
-			fmt.Fprintln(dw.Wayback, url)
-		} else if res.Source == "katana" && dw.Katana != nil {
-			fmt.Fprintln(dw.Katana, url)
-		}
+		if res.Source == "wayback" && dw.Wayback != nil { fmt.Fprintln(dw.Wayback, url) } 
+		else if res.Source == "katana" && dw.Katana != nil { fmt.Fprintln(dw.Katana, url) }
 
-		// 2. Save to combined raw file
-		if dw.All != nil {
-			fmt.Fprintln(dw.All, url)
-		}
+		if dw.All != nil { fmt.Fprintln(dw.All, url) }
 
-		// 3. Normalize URL for filtering
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-			url = "http://" + url
-		}
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") { url = "http://" + url }
 
-		// 4. FILTERING LOGIC
 		if shouldFilter {
-			if filter.IsStaticResource(url) {
-				filteredOut++
-				continue // Skip saving to filtered.txt
-			}
+			if filter.IsStaticResource(url) { filteredOut++; continue }
 		}
 
-		// 5. Deduplication
-		if _, exists := seenFiltered[url]; exists {
-			continue 
-		}
+		if _, exists := seenFiltered[url]; exists { continue }
 
 		seenFiltered[url] = struct{}{}
 		savedUnique++
-		
-		// 6. Save to filtered file
-		if dw.Filtered != nil {
-			fmt.Fprintln(dw.Filtered, url)
-		}
+		if dw.Filtered != nil { fmt.Fprintln(dw.Filtered, url) }
 	}
 
-	// Close all open files
 	for _, dw := range writers {
 		if dw.Wayback != nil { dw.Wayback.Close() }
 		if dw.Katana != nil { dw.Katana.Close() }
@@ -191,7 +243,6 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 		if dw.Filtered != nil { dw.Filtered.Close() }
 	}
 
-	// Print explicit statistics
 	logger.Success("Pipeline finished.")
 	if shouldFilter {
 		logger.Info("Stats: Processed %d URLs | Filtered out %d static assets | Saved %d unique valid URLs", totalProcessed, filteredOut, savedUnique)
@@ -241,10 +292,7 @@ func filterExistingDomains(inputChan <-chan string) {
 			if rawURL == "" { continue }
 			countTotal++
 
-			if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
-				rawURL = "http://" + rawURL
-			}
-
+			if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") { rawURL = "http://" + rawURL }
 			if _, exists := seen[rawURL]; exists { continue }
 			if filter.IsStaticResource(rawURL) { continue }
 
@@ -255,15 +303,15 @@ func filterExistingDomains(inputChan <-chan string) {
 
 		inFile.Close()
 		outFile.Close()
-
 		logger.Success("Filtered %s: %d total -> %d valid URLs", domain, countTotal, countFiltered)
 	}
 }
 
+// --- Helper Functions ---
+
 func initDomainFiles(domain string) *DomainWriter {
 	dir := filepath.Join("tmp", domain)
 	os.MkdirAll(dir, 0755)
-
 	dw := &DomainWriter{}
 	dw.Wayback, _ = os.Create(filepath.Join(dir, "wayback.txt"))
 	dw.Katana, _ = os.Create(filepath.Join(dir, "katana.txt"))
@@ -297,16 +345,41 @@ func readFile(path string, out chan<- string) {
 	if err != nil { logger.Error("Could not open file: %v", err); return }
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" { out <- line }
-	}
+	for scanner.Scan() { line := scanner.Text(); if line != "" { out <- line } }
 }
 
 func readStdin(out chan<- string) {
 	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() { line := scanner.Text(); if line != "" { out <- line } }
+}
+
+// --- NEW Helper Functions for Parameter Discovery ---
+
+func readLinesFromFile(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil { return nil, err }
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" { out <- line }
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" { lines = append(lines, line) }
 	}
+	return lines, scanner.Err()
+}
+
+func writeLinesToFile(path string, lines []string) error {
+	file, err := os.Create(path)
+	if err != nil { return err }
+	defer file.Close()
+
+	for _, line := range lines { fmt.Fprintln(file, line) }
+	return nil
+}
+
+func mapKeysToSlice(m map[string]struct{}) []string {
+	var slice []string
+	for k := range m { slice = append(slice, k) }
+	return slice
 }

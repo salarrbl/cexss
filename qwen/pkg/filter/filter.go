@@ -11,7 +11,7 @@ var BlacklistedExtensions = []string{
 	".pdf", ".doc", ".exe", ".zip", ".xml", ".woff", ".woff2", ".ttf", ".otf", ".ico",
 	".bmp", ".eot", ".flv", ".webm", ".webp", ".ppt", ".pptx", ".scss", ".tif", ".tiff",
 	".m4a", ".m4p", ".fnt", ".ogg", ".ogv", ".wmv", ".mov", ".rtf", ".swf", ".htc",
-	".image", ".rf", ".txt", ".msi",
+	".image", ".rf", ".txt", ".msi",".apk",
 }
 
 // BlacklistedSuffixes handles hyphenated AND underscored image names.
