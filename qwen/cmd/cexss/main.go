@@ -15,33 +15,47 @@ import (
 func main() {
 	urlFlag := flag.String("u", "", "Single target URL")
 	fileFlag := flag.String("f", "", "File containing target URLs")
-	
-	// NEW: Add a flag for domain collection
 	domainFlag := flag.String("d", "", "Domain to collect URLs for (e.g., example.com)")
-	
 	flag.Parse()
 
 	urlChan := make(chan string, 100)
-
-	// We use a WaitGroup to wait for our background goroutines to finish 
-	// before the program exits.
 	var wg sync.WaitGroup
 
-	// --- INPUT LOADING LOGIC ---
 	if *domainFlag != "" {
-		// If the user provided a domain, we use the URL Collection step!
-		wg.Add(1)
+		// We are running TWO collectors concurrently, so we add 2 to the WaitGroup
+		wg.Add(2)
+
+		// --- Goroutine 1: Wayback Machine ---
 		go func() {
 			defer wg.Done()
-			defer close(urlChan) // Close the channel when collection is done
-
 			wayback := collector.NewWaybackCollector()
 			if err := wayback.Fetch(*domainFlag, urlChan); err != nil {
 				logger.Error("Wayback collector failed: %v", err)
 			}
 		}()
+
+		// --- Goroutine 2: Katana Crawler ---
+		go func() {
+			defer wg.Done()
+			katana := collector.NewKatanaCollector()
+			if err := katana.Fetch(*domainFlag, urlChan); err != nil {
+				logger.Error("Katana collector failed: %v", err)
+			}
+		}()
+
+		// --- Goroutine 3: The Channel Closer ---
+		// CRITICAL GO LESSON: We cannot let the collectors close the channel.
+		// If Wayback finishes first and closes the channel, Katana will PANIC 
+		// when it tries to send a URL into a closed channel!
+		// Instead, we start a separate goroutine that waits for BOTH to finish, 
+		// and ONLY THEN closes the channel.
+		go func() {
+			wg.Wait()
+			close(urlChan)
+		}()
+
 	} else {
-		// Otherwise, fall back to the existing stdin/file/single URL logic
+		// Fallback to existing stdin/file/single URL logic
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -50,11 +64,9 @@ func main() {
 			if *urlFlag != "" {
 				urlChan <- *urlFlag
 			}
-
 			if *fileFlag != "" {
 				readFile(*fileFlag, urlChan)
 			}
-
 			stat, _ := os.Stdin.Stat()
 			if (stat.Mode() & os.ModeCharDevice) == 0 {
 				readStdin(urlChan)
@@ -66,31 +78,22 @@ func main() {
 
 	seen := make(map[string]struct{})
 
-	// We range over the channel. This loop will automatically exit 
-	// when the channel is closed by the goroutines above.
+	// This loop will automatically exit when Goroutine 3 closes the channel
 	for target := range urlChan {
 		target = strings.TrimSpace(target)
 		if target == "" {
 			continue
 		}
-
 		if _, exists := seen[target]; exists {
-			continue 
+			continue
 		}
-		
 		if filter.IsStaticResource(target) {
-			continue 
+			continue
 		}
-
 		seen[target] = struct{}{}
-
-		// For now, we just log that the URL survived the collection and filtering steps.
-		// In the next steps, we will pass this to the Parameter Discovery Engine.
 		logger.Success("Collected & Valid: %s", target)
 	}
 
-	// Wait for all input/collector goroutines to finish cleanly
-	wg.Wait()
 	logger.Info("Pipeline finished.")
 }
 
