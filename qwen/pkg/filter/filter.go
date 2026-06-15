@@ -11,13 +11,13 @@ var BlacklistedExtensions = []string{
 	".pdf", ".doc", ".exe", ".zip", ".xml", ".woff", ".woff2", ".ttf", ".otf", ".ico",
 	".bmp", ".eot", ".flv", ".webm", ".webp", ".ppt", ".pptx", ".scss", ".tif", ".tiff",
 	".m4a", ".m4p", ".fnt", ".ogg", ".ogv", ".wmv", ".mov", ".rtf", ".swf", ".htc",
-	".image", ".rf", ".txt", ".msi",
+	".image", ".rf", ".txt", ".msi",".apk",
 }
 
 // BlacklistedSuffixes handles your specific request for hyphenated image names 
 // (e.g., "thumbnail-800x600-jpg").
 var BlacklistedSuffixes = []string{
-	"-jpg", "-jpeg", "-png", "-gif",".jpg%5C",".jpeg%5C", ".png%5C",
+	"-jpg", "-jpeg", "-png", "-gif","jpg%5C","jpeg%5C", "png%5C",
 }
 
 // IsStaticResource checks if the URL points to a file type we don't want to scan.
