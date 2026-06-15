@@ -23,7 +23,6 @@ type DomainWriter struct {
 }
 
 func main() {
-	// 1. Define Flags (Removed -w)
 	ucMode := flag.Bool("uc", false, "Enable URL Collection mode (runs Wayback, Katana)")
 	fuMode := flag.Bool("fu", false, "Filter URLs. If used alone, filters existing files in ./tmp/")
 	psMode := flag.Bool("ps", false, "Parameter Search: discover parameters from filtered URLs")
@@ -51,7 +50,7 @@ func main() {
 		fmt.Printf("%s%sEXAMPLES:%s\n", Bold, Blue, Reset)
 		fmt.Printf("  %s▶%s cexss -uc -fu example.com\n", Yellow, Reset)
 		fmt.Printf("  %s▶%s cexss -ps example.com\n", Yellow, Reset)
-		fmt.Printf("  %s▶%s cexss -uc -fu -ps example.com\n\n", Yellow, Reset)
+		fmt.Printf("  %s▶%s cat targets.txt | cexss -uc -fu -ps\n\n", Yellow, Reset)
 	}
 
 	if len(os.Args) == 1 {
@@ -66,7 +65,13 @@ func main() {
 		singleTarget = flag.Arg(0)
 	}
 
-	inputChan := getInputChannel(singleTarget, *fileFlag)
+	// --- CRITICAL FIX: Read all targets into memory ONCE ---
+	// This prevents the "stdin consumed" bug when chaining flags like -uc -ps
+	targets := getTargets(singleTarget, *fileFlag)
+	if len(targets) == 0 {
+		logger.Error("No targets provided. Use -h for help.")
+		os.Exit(1)
+	}
 
 	// --- ROUTING LOGIC ---
 	if *ucMode {
@@ -77,9 +82,8 @@ func main() {
 			var collectorWg sync.WaitGroup
 			seenDomains := make(map[string]struct{})
 
-			for domain := range inputChan {
-				domain = strings.TrimSpace(domain)
-				if domain == "" { continue }
+			// Loop over the in-memory slice instead of a channel
+			for _, domain := range targets {
 				if _, exists := seenDomains[domain]; exists { continue }
 				seenDomains[domain] = struct{}{}
 
@@ -103,25 +107,24 @@ func main() {
 		
 		if *psMode {
 			logger.Info("Chaining Parameter Search (-ps)...")
-			psInputChan := getInputChannel(singleTarget, *fileFlag)
-			processParameterDiscovery(psInputChan) // Removed wordlist argument
+			// Pass the in-memory slice directly! No need to re-read stdin.
+			processParameterDiscovery(targets) 
 		}
 
 	} else if *fuMode {
 		logger.Info("Filter mode (-fu) enabled without collection.")
-		filterExistingDomains(getInputChannel(singleTarget, *fileFlag))
+		filterExistingDomains(targets)
 		logger.Success("Filtering finished.")
-		return
 
 	} else if *psMode {
 		logger.Info("Parameter Search mode (-ps) enabled. Reading existing filtered URLs...")
-		processParameterDiscovery(getInputChannel(singleTarget, *fileFlag)) // Removed wordlist argument
-		return
+		processParameterDiscovery(targets)
 
 	} else {
+		// Direct URL processing (No collection, no filtering)
 		urlChan := make(chan collector.CollectedURL, 100)
 		go func() {
-			for u := range getInputChannel(singleTarget, *fileFlag) {
+			for _, u := range targets {
 				urlChan <- collector.CollectedURL{URL: u, Source: "stdin", Domain: "default"}
 			}
 			close(urlChan)
@@ -131,20 +134,56 @@ func main() {
 	}
 }
 
-// processParameterDiscovery: PURELY OFFLINE. Reads existing files, extracts URL params.
-func processParameterDiscovery(inputChan <-chan string) { // Removed wordlistPath parameter
+// getTargets reads all input sources exactly ONCE and returns a slice of strings.
+func getTargets(singleTarget, filePath string) []string {
+	var targets []string
+	seen := make(map[string]struct{})
+
+	addTarget := func(t string) {
+		t = strings.TrimSpace(t)
+		if t == "" { return }
+		if _, exists := seen[t]; !exists {
+			seen[t] = struct{}{}
+			targets = append(targets, t)
+		}
+	}
+
+	if singleTarget != "" {
+		addTarget(singleTarget)
+	}
+
+	if filePath != "" {
+		lines, err := readLinesFromFile(filePath)
+		if err == nil {
+			for _, line := range lines {
+				addTarget(line)
+			}
+		} else {
+			logger.Error("Could not read file %s: %v", filePath, err)
+		}
+	}
+
+	stat, _ := os.Stdin.Stat()
+	if (stat.Mode() & os.ModeCharDevice) == 0 {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			addTarget(scanner.Text())
+		}
+	}
+
+	return targets
+}
+
+// processParameterDiscovery now takes a []string slice instead of a channel
+func processParameterDiscovery(targets []string) {
 	discoverer := param.NewDiscoverer()
 
-	for domain := range inputChan {
-		domain = strings.TrimSpace(domain)
-		if domain == "" { continue }
-
+	for _, domain := range targets {
 		safeDomain := sanitizeDomain(domain)
 		dir := filepath.Join("tmp", safeDomain)
 		
 		logger.Info("Starting offline Parameter Discovery for %s...", domain)
 
-		// 1. Read URLs from filtered.txt (or fallback to all.txt)
 		filteredFile := filepath.Join(dir, "filtered.txt")
 		urls, err := readLinesFromFile(filteredFile)
 		if err != nil {
@@ -158,7 +197,6 @@ func processParameterDiscovery(inputChan <-chan string) { // Removed wordlistPat
 		
 		logger.Info("Loaded %d URLs from file for %s", len(urls), domain)
 
-		// 2. Extract parameters (ZERO network requests)
 		allParams := make(map[string]struct{})
 		
 		for _, u := range urls {
@@ -172,7 +210,6 @@ func processParameterDiscovery(inputChan <-chan string) { // Removed wordlistPat
 			}
 		}
 
-		// 3. Save discovered parameters to params.txt
 		paramsFile := filepath.Join(dir, "params.txt")
 		err = writeLinesToFile(paramsFile, mapKeysToSlice(allParams))
 		if err != nil {
@@ -183,8 +220,6 @@ func processParameterDiscovery(inputChan <-chan string) { // Removed wordlistPat
 		logger.Success("Instantly discovered %d unique parameters from file for %s. Saved to %s", len(allParams), domain, paramsFile)
 	}
 }
-
-// ... [Keep processPipeline, filterExistingDomains, initDomainFiles, sanitizeDomain, getInputChannel, readFile, readStdin, readLinesFromFile, writeLinesToFile, mapKeysToSlice EXACTLY as they were] ...
 
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Processing URLs...")
@@ -261,11 +296,9 @@ func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Check ./tmp/ for results.")
 }
 
-func filterExistingDomains(inputChan <-chan string) {
-	for domain := range inputChan {
-		domain = strings.TrimSpace(domain)
-		if domain == "" { continue }
-
+// filterExistingDomains now takes a []string slice
+func filterExistingDomains(targets []string) {
+	for _, domain := range targets {
 		safeDomain := sanitizeDomain(domain)
 		dir := filepath.Join("tmp", safeDomain)
 
@@ -335,37 +368,6 @@ func sanitizeDomain(d string) string {
 	d = strings.ReplaceAll(d, "/", "_")
 	d = strings.ReplaceAll(d, ":", "_")
 	return d
-}
-
-func getInputChannel(singleTarget, filePath string) <-chan string {
-	out := make(chan string)
-	go func() {
-		defer close(out)
-		if singleTarget != "" { out <- singleTarget }
-		if filePath != "" { readFile(filePath, out) }
-		stat, _ := os.Stdin.Stat()
-		if (stat.Mode() & os.ModeCharDevice) == 0 { readStdin(out) }
-	}()
-	return out
-}
-
-func readFile(path string, out chan<- string) {
-	file, err := os.Open(path)
-	if err != nil { logger.Error("Could not open file: %v", err); return }
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" { out <- line }
-	}
-}
-
-func readStdin(out chan<- string) {
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" { out <- line }
-	}
 }
 
 func readLinesFromFile(path string) ([]string, error) {
