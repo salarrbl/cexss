@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -13,51 +14,45 @@ import (
 	"github.com/salarrbl/cexss/pkg/logger"
 )
 
+// DomainWriter holds the open file handles for a specific domain.
+// Keeping files open is crucial for high-performance I/O.
+type DomainWriter struct {
+	Wayback  *os.File
+	Katana   *os.File
+	All      *os.File
+	Filtered *os.File
+}
+
 func main() {
-	// 1. Define Flags
-	// -uc is a boolean switch that turns on URL Collection mode
-	ucMode := flag.Bool("uc", false, "Enable URL Collection mode (runs Wayback, Katana, etc.)")
+	ucMode := flag.Bool("uc", false, "Enable URL Collection mode")
 	fileFlag := flag.String("f", "", "File containing target URLs or Domains")
 	
-	// Customize the help menu so it looks professional
 	flag.Usage = func() {
 		fmt.Printf("Cexss - High-performance XSS discovery tool\n\n")
 		fmt.Printf("Usage: %s [flags] [target]\n\n", os.Args[0])
 		fmt.Println("Flags:")
 		flag.PrintDefaults()
-		fmt.Println("\nExamples:")
-		fmt.Println("  # Run URL collection on a single domain")
-		fmt.Printf("  %s -uc example.com\n", os.Args[0])
-		fmt.Println("  # Run URL collection via stdin pipe")
-		fmt.Println("  echo example.com | cexss -uc")
-		fmt.Println("  # Process a single URL directly (bypasses collection)")
-		fmt.Println("  cexss http://example.com/page?id=1")
 	}
 
-	// 2. Show help if NO flags or arguments are provided at all
-	// os.Args[0] is the program name. If length is 1, nothing else was typed.
 	if len(os.Args) == 1 {
 		flag.Usage()
 		os.Exit(0)
 	}
 
-	// 3. Parse the flags
 	flag.Parse()
 
-	// 4. Capture the Positional Argument (e.g., the "domain.com" in "-uc domain.com")
 	singleTarget := ""
 	if flag.NArg() > 0 {
 		singleTarget = flag.Arg(0)
 	}
 
-	// 5. Create the unified input channel (handles single target, file, or stdin)
 	inputChan := getInputChannel(singleTarget, *fileFlag)
-
-	// 6. Create the channel for URLs that will go through the pipeline
-	urlChan := make(chan string, 100)
+	
+	// CHANGED: The channel now carries the CollectedURL struct
+	urlChan := make(chan collector.CollectedURL, 100)
 
 	if *ucMode {
-		logger.Info("URL Collection mode (-uc) enabled. Running collectors...")
+		logger.Info("URL Collection mode (-uc) enabled.")
 		
 		go func() {
 			var collectorWg sync.WaitGroup
@@ -68,119 +63,153 @@ func main() {
 				if domain == "" {
 					continue
 				}
-				
 				if _, exists := seenDomains[domain]; exists {
 					continue
 				}
 				seenDomains[domain] = struct{}{}
 
-				// Spawn Wayback Collector
-				collectorWg.Add(1)
+				collectorWg.Add(2)
 				go func(d string) {
 					defer collectorWg.Done()
-					wayback := collector.NewWaybackCollector()
-					if err := wayback.Fetch(d, urlChan); err != nil {
-						logger.Error("Wayback failed for %s: %v", d, err)
-					}
+					collector.NewWaybackCollector().Fetch(d, urlChan)
 				}(domain)
 
-				// Spawn Katana Collector
-				collectorWg.Add(1)
 				go func(d string) {
 					defer collectorWg.Done()
-					katana := collector.NewKatanaCollector()
-					if err := katana.Fetch(d, urlChan); err != nil {
-						logger.Error("Katana failed for %s: %v", d, err)
-					}
+					collector.NewKatanaCollector().Fetch(d, urlChan)
 				}(domain)
 			}
 
-			// Wait for ALL collectors to finish, then safely close the channel
 			collectorWg.Wait()
 			close(urlChan)
 		}()
-
 	} else {
-		// URL Mode: Input is already URLs, just pass them through to the pipeline
 		go func() {
 			for u := range inputChan {
-				urlChan <- u
+				// If not in UC mode, we assume input is already URLs.
+				// We assign them a generic source and domain.
+				urlChan <- collector.CollectedURL{URL: u, Source: "stdin", Domain: "default"}
 			}
 			close(urlChan)
 		}()
 	}
 
-	// 7. Process the URLs (Normalize, Deduplicate, Filter)
-	logger.Info("Processing URLs...")
-	seen := make(map[string]struct{})
+	logger.Info("Processing URLs and saving to ./tmp/...")
+	
+	// Map to keep track of our open files for each domain
+	writers := make(map[string]*DomainWriter)
+	
+	// Deduplication map for the filtered URLs
+	seenFiltered := make(map[string]struct{})
 
-	for target := range urlChan {
-		target = strings.TrimSpace(target)
-		if target == "" {
+	// Process the stream
+	for res := range urlChan {
+		url := strings.TrimSpace(res.URL)
+		if url == "" {
 			continue
 		}
 
-		// Normalize URL (ensure it has a scheme so url.Parse works later)
-		if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-			target = "http://" + target
+		// 1. Sanitize domain name for folder creation (remove http://, replace / and :)
+		safeDomain := sanitizeDomain(res.Domain)
+		
+		// 2. Initialize files for this domain if we haven't already
+		dw, exists := writers[safeDomain]
+		if !exists {
+			dw = initDomainFiles(safeDomain)
+			writers[safeDomain] = dw
 		}
 
-		if _, exists := seen[target]; exists {
-			continue
+		// 3. Save to tool-specific file (wayback.txt or katana.txt)
+		if res.Source == "wayback" && dw.Wayback != nil {
+			fmt.Fprintln(dw.Wayback, url)
+		} else if res.Source == "katana" && dw.Katana != nil {
+			fmt.Fprintln(dw.Katana, url)
 		}
 
-		if filter.IsStaticResource(target) {
-			continue
+		// 4. Save to combined raw file (all.txt)
+		if dw.All != nil {
+			fmt.Fprintln(dw.All, url)
 		}
 
-		seen[target] = struct{}{}
-		logger.Success("Valid URL: %s", target)
+		// 5. Normalize URL for filtering
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			url = "http://" + url
+		}
+
+		// 6. Filter and Deduplicate
+		if _, exists := seenFiltered[url]; exists {
+			continue // Skip duplicates
+		}
+		if filter.IsStaticResource(url) {
+			continue // Skip static assets
+		}
+
+		// Mark as seen and save to filtered file
+		seenFiltered[url] = struct{}{}
+		if dw.Filtered != nil {
+			fmt.Fprintln(dw.Filtered, url)
+		}
 	}
 
-	logger.Info("Pipeline finished.")
+	// CRITICAL: Close all open files when the pipeline finishes!
+	for _, dw := range writers {
+		if dw.Wayback != nil { dw.Wayback.Close() }
+		if dw.Katana != nil { dw.Katana.Close() }
+		if dw.All != nil { dw.All.Close() }
+		if dw.Filtered != nil { dw.Filtered.Close() }
+	}
+
+	logger.Success("Pipeline finished. Check ./tmp/ for results.")
 }
 
-// getInputChannel handles reading from a single target string, -f file, or stdin.
+// initDomainFiles creates the directory and opens the 4 files for a domain.
+func initDomainFiles(domain string) *DomainWriter {
+	dir := filepath.Join("tmp", domain)
+	os.MkdirAll(dir, 0755)
+
+	dw := &DomainWriter{}
+	
+	// We use os.Create which truncates the file if it exists, or creates it.
+	// O_APPEND is not strictly needed here since we create a fresh file for this run,
+	// but fmt.Fprintln handles the newlines automatically.
+	dw.Wayback, _ = os.Create(filepath.Join(dir, "wayback.txt"))
+	dw.Katana, _ = os.Create(filepath.Join(dir, "katana.txt"))
+	dw.All, _ = os.Create(filepath.Join(dir, "all.txt"))
+	dw.Filtered, _ = os.Create(filepath.Join(dir, "filtered.txt"))
+
+	return dw
+}
+
+// sanitizeDomain cleans the domain string so it can be safely used as a folder name.
+func sanitizeDomain(d string) string {
+	d = strings.ReplaceAll(d, "http://", "")
+	d = strings.ReplaceAll(d, "https://", "")
+	d = strings.ReplaceAll(d, "/", "_")
+	d = strings.ReplaceAll(d, ":", "_")
+	return d
+}
+
+// --- Input Channel Logic (Unchanged) ---
 func getInputChannel(singleTarget, filePath string) <-chan string {
 	out := make(chan string)
-
 	go func() {
 		defer close(out)
-
-		// 1. Single target from positional argument
-		if singleTarget != "" {
-			out <- singleTarget
-		}
-
-		// 2. File input
-		if filePath != "" {
-			readFile(filePath, out)
-		}
-
-		// 3. Stdin input (if data is being piped)
+		if singleTarget != "" { out <- singleTarget }
+		if filePath != "" { readFile(filePath, out) }
 		stat, _ := os.Stdin.Stat()
-		if (stat.Mode() & os.ModeCharDevice) == 0 {
-			readStdin(out)
-		}
+		if (stat.Mode() & os.ModeCharDevice) == 0 { readStdin(out) }
 	}()
-
 	return out
 }
 
 func readFile(path string, out chan<- string) {
 	file, err := os.Open(path)
-	if err != nil {
-		logger.Error("Could not open file: %v", err)
-		return
-	}
+	if err != nil { logger.Error("Could not open file: %v", err); return }
 	defer file.Close()
-
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line != "" {
-			out <- line
-		}
+		if line != "" { out <- line }
 	}
 }
 
@@ -188,8 +217,6 @@ func readStdin(out chan<- string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line != "" {
-			out <- line
-		}
+		if line != "" { out <- line }
 	}
 }

@@ -1,11 +1,15 @@
 package collector
 
-// Collector is an interface that defines the contract for all URL collection engines.
-// Any struct that implements the Fetch method automatically satisfies this interface.
-// This allows us to treat Wayback, Katana, and CommonCrawl exactly the same way in main.go.
+// CollectedURL holds the URL and metadata about where it came from.
+// We use a struct so the main pipeline knows which file to save it to.
+type CollectedURL struct {
+	URL    string // The actual URL
+	Source string // "wayback" or "katana"
+	Domain string // The target domain (e.g., "example.com")
+}
+
+// Collector is the interface for all URL collection engines.
+// Notice we changed the channel type from `chan<- string` to `chan<- CollectedURL`.
 type Collector interface {
-	// Fetch takes a target (usually a domain like "example.com")
-	// and sends all discovered URLs into the 'out' channel.
-	// It returns an error if the collection process fails.
-	Fetch(target string, out chan<- string) error
+	Fetch(target string, out chan<- CollectedURL) error
 }
