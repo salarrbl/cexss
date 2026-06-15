@@ -1,0 +1,45 @@
+id: detect-Cexss
+info:
+  name: Detect Cexss Patterns
+  author: rebel
+  severity: medium
+  description: This template detects specific electro0neinject patterns in the body of HTTP responses.
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+    matchers-condition: or
+    matchers:
+      - type: word
+        words:
+          - "<b/cexss"
+          - 'cexss""'
+          - "cexss''"
+          - '""cexss'
+          - "''cexss"
+          - 'cexss\\""'
+          - "cexss\\''"
+          - '"\\"cexss'
+          - "'\\'cexss"
+        part: body
+        condition: or
+
+  - method: POST
+    path:
+      - "{{BaseURL}}"
+    matchers-condition: or
+    matchers:
+      - type: word
+        words:
+          - "<b/cexss"
+          - 'cexss""'
+          - "cexss''"
+          - '""cexss'
+          - "''cexss"
+          - 'cexss\\""'
+          - "cexss\\''"
+          - '"\\"cexss'
+          - "'\\'cexss"
+        part: body
+        condition: or
