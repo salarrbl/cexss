@@ -211,9 +211,34 @@ func runNuclei(targets []string, templatePath string) {
 		return
 	}
 
-	cmd := exec.Command("nuclei", "-l", "-", "-t", templatePath, "-silent")
+	// FIX: Nuclei sometimes fails with "-l -" (stdin) depending on the version.
+	// We write all URLs to a temporary file and pass that file to Nuclei. This is 100% reliable.
+	tmpFile, err := os.CreateTemp("", "cexss-nuclei-*.txt")
+	if err != nil {
+		logger.Error("Could not create temp file for Nuclei: %v", err)
+		return
+	}
+	tmpPath := tmpFile.Name()
 	
-	stdin, _ := cmd.StdinPipe()
+	// defer os.Remove(tmpPath) // Automatically delete the temp file when the function finishes
+	// Note: I commented out the auto-delete so you can inspect the file if you want to debug Nuclei.
+	// If you want it to auto-delete, just remove the // from the line above.
+
+	// Write all URLs to the temp file
+	totalURLs := 0
+	for _, file := range allXamirFiles {
+		lines, _ := readLinesFromFile(file)
+		for _, line := range lines {
+			fmt.Fprintln(tmpFile, line)
+			totalURLs++
+		}
+	}
+	tmpFile.Close()
+
+	logger.Info("Prepared %d URLs for Nuclei scan in temporary file.", totalURLs)
+
+	// Run Nuclei using the temporary file instead of stdin
+	cmd := exec.Command("nuclei", "-l", tmpPath, "-t", templatePath, "-silent")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -222,21 +247,12 @@ func runNuclei(targets []string, templatePath string) {
 		return
 	}
 
-	for _, file := range allXamirFiles {
-		lines, _ := readLinesFromFile(file)
-		for _, line := range lines {
-			fmt.Fprintln(stdin, line)
-		}
-	}
-	stdin.Close()
-
 	if err := cmd.Wait(); err != nil {
 		logger.Error("Nuclei error: %v", err)
 	} else {
 		logger.Success("Nuclei scan completed.")
 	}
 }
-
 func processParameterDiscovery(targets []string) {
 	discoverer := param.NewDiscoverer()
 	wordlistParams := loadWordlists()
