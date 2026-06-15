@@ -136,8 +136,14 @@ func main() {
 }
 
 // processParameterDiscovery reads filtered.txt, deduplicates paths, and extracts params.
+// processParameterDiscovery reads filtered.txt, deduplicates paths, fetches HTML, and extracts params.
 func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 	discoverer := param.NewDiscoverer()
+	
+	// Create a shared HTTP client with a timeout to prevent the tool from hanging
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
 
 	for domain := range inputChan {
 		domain = strings.TrimSpace(domain)
@@ -148,7 +154,7 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 		
 		logger.Info("Starting Parameter Discovery for %s...", domain)
 
-		// 1. Try to read filtered.txt. If it doesn't exist, fallback to all.txt.
+		// 1. Read URLs (prefer filtered.txt, fallback to all.txt)
 		filteredFile := filepath.Join(dir, "filtered.txt")
 		urls, err := readLinesFromFile(filteredFile)
 		if err != nil {
@@ -159,24 +165,55 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 				continue
 			}
 			logger.Warning("filtered.txt not found. Falling back to all.txt for %s", domain)
-		}
+	ZX	}
 		logger.Info("Loaded %d URLs for %s", len(urls), domain)
 
 		// 2. THE SPEED SECRET: Get Unique Paths
 		uniqueURLs := param.GetUniquePaths(urls)
 		logger.Info("Found %d unique paths. This saves us %d network requests!", len(uniqueURLs), len(urls)-len(uniqueURLs))
 
-		// 3. Extract existing parameters from the URLs themselves
+		// 3. Extract parameters
 		allParams := make(map[string]struct{})
+		fetchedCount := 0
+
 		for _, u := range uniqueURLs {
-			params := discoverer.ExtractFromURL(u)
-			for _, p := range params {
-				allParams[p] = struct{}{} // Deduplicate parameters
+			// Ensure it's a valid HTTP/HTTPS URL before fetching
+			if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+				u = "https://" + u
+			}
+
+			// A. Extract from the URL query string (Free, no network request)
+			urlParams := discoverer.ExtractFromURL(u)
+			for _, p := range urlParams {
+				allParams[p] = struct{}{}
+			}
+
+			// B. Fetch the HTML and extract form parameters
+			resp, err := client.Get(u)
+			if err != nil {
+				continue // Skip if the page is dead or times out
+			}
+			
+			// We only care about HTML pages, not images/PDFs (double-check)
+			contentType := resp.Header.Get("Content-Type")
+			if strings.Contains(contentType, "text/html") {
+				// Read the body
+				bodyBytes, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				
+				if readErr == nil {
+					htmlParams := discoverer.ExtractFromHTML(string(bodyBytes))
+					for _, p := range htmlParams {
+						allParams[p] = struct{}{}
+					}
+					fetchedCount++
+				}
+			} else {
+				resp.Body.Close()
 			}
 		}
 
-		// TODO: In the next steps, we will add HTML Form parsing, JS parsing, 
-		// and Wordlist brute-forcing right here!
+		// TODO: In the next step, we will add Wordlist brute-forcing here!
 
 		// 4. Save discovered parameters to params.txt
 		paramsFile := filepath.Join(dir, "params.txt")
@@ -186,10 +223,9 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 			continue
 		}
 
-		logger.Success("Discovered %d unique parameters for %s. Saved to %s", len(allParams), domain, paramsFile)
+		logger.Success("Discovered %d unique parameters for %s (Fetched %d pages). Saved to %s", len(allParams), domain, fetchedCount, paramsFile)
 	}
 }
-
 // --- Existing Pipeline Functions (Unchanged) ---
 
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
