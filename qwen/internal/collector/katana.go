@@ -2,7 +2,7 @@ package collector
 
 import (
 	"bufio"
-	"fmt"
+	// REMOVED: "fmt" because we are using logger instead
 	"os/exec"
 	"strings"
 
@@ -53,7 +53,6 @@ func (k *KatanaCollector) Fetch(target string, out chan<- CollectedURL) error {
 		return err
 	}
 
-	// GREEN LOG: Only log when completely finished.
 	logger.Success("Katana done for %s (%d URLs)", target, count)
 	return nil
 }
