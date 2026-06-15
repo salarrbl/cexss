@@ -70,6 +70,9 @@ func main() {
 		singleTarget = flag.Arg(0)
 	}
 
+	// DEBUG: Prove we captured the target correctly
+	logger.Info("DEBUG: Target captured as: '%s'", singleTarget)
+
 	inputChan := getInputChannel(singleTarget, *fileFlag)
 
 	if *ucMode {
@@ -106,24 +109,26 @@ func main() {
 		
 		if *psMode {
 			logger.Info("Chaining Parameter Search (-ps)...")
-			processParameterDiscovery(inputChan, *wordlistFlag)
+			// Create a FRESH input channel for the parameter search
+			psInputChan := getInputChannel(singleTarget, *fileFlag)
+			processParameterDiscovery(psInputChan, *wordlistFlag)
 		}
 
 	} else if *fuMode {
 		logger.Info("Filter mode (-fu) enabled without collection.")
-		filterExistingDomains(inputChan)
+		filterExistingDomains(getInputChannel(singleTarget, *fileFlag))
 		logger.Success("Filtering finished.")
 		return
 
 	} else if *psMode {
-		logger.Info("Parameter Search mode (-ps) enabled. Reading filtered URLs...")
-		processParameterDiscovery(inputChan, *wordlistFlag)
+		logger.Info("Parameter Search mode (-ps) enabled. Reading existing filtered URLs...")
+		processParameterDiscovery(getInputChannel(singleTarget, *fileFlag), *wordlistFlag)
 		return
 
 	} else {
 		urlChan := make(chan collector.CollectedURL, 100)
 		go func() {
-			for u := range inputChan {
+			for u := range getInputChannel(singleTarget, *fileFlag) {
 				urlChan <- collector.CollectedURL{URL: u, Source: "stdin", Domain: "default"}
 			}
 			close(urlChan)
@@ -133,18 +138,29 @@ func main() {
 	}
 }
 
-// processParameterDiscovery reads filtered.txt, deduplicates paths, fetches HTML, and extracts params.
+// processParameterDiscovery with HEAVY DEBUG LOGGING to find the exact failure point
 func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
+	logger.Info("DEBUG: Entered processParameterDiscovery function.")
+	
 	discoverer := param.NewDiscoverer()
 	
-	// Create a shared HTTP client with a timeout to prevent the tool from hanging
+	// Added a standard User-Agent to prevent immediate WAF blocking
 	client := &http.Client{
 		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     30 * time.Second,
+		},
 	}
 
 	for domain := range inputChan {
+		logger.Info("DEBUG: Processing domain in loop: '%s'", domain)
 		domain = strings.TrimSpace(domain)
-		if domain == "" { continue }
+		if domain == "" {
+			logger.Warning("DEBUG: Domain is empty, skipping.")
+			continue
+		}
 
 		safeDomain := sanitizeDomain(domain)
 		dir := filepath.Join("tmp", safeDomain)
@@ -153,8 +169,11 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 
 		// 1. Read URLs (prefer filtered.txt, fallback to all.txt)
 		filteredFile := filepath.Join(dir, "filtered.txt")
+		logger.Info("DEBUG: Looking for %s", filteredFile)
+		
 		urls, err := readLinesFromFile(filteredFile)
 		if err != nil {
+			logger.Warning("DEBUG: filtered.txt error: %v. Falling back to all.txt", err)
 			allFile := filepath.Join(dir, "all.txt")
 			urls, err = readLinesFromFile(allFile)
 			if err != nil {
@@ -163,7 +182,8 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 			}
 			logger.Warning("filtered.txt not found. Falling back to all.txt for %s", domain)
 		}
-		logger.Info("Loaded %d URLs for %s", len(urls), domain)
+		
+		logger.Info("DEBUG: Successfully loaded %d URLs for %s", len(urls), domain)
 
 		// 2. THE SPEED SECRET: Get Unique Paths
 		uniqueURLs := param.GetUniquePaths(urls)
@@ -172,6 +192,7 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 		// 3. Extract parameters
 		allParams := make(map[string]struct{})
 		fetchedCount := 0
+		failedCount := 0
 
 		for _, u := range uniqueURLs {
 			if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
@@ -185,8 +206,12 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 			}
 
 			// B. Fetch the HTML and extract form parameters
-			resp, err := client.Get(u)
+			req, _ := http.NewRequest("GET", u, nil)
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36")
+			
+			resp, err := client.Do(req)
 			if err != nil {
+				failedCount++
 				continue // Skip if the page is dead or times out
 			}
 			
@@ -207,6 +232,8 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 			}
 		}
 
+		logger.Info("DEBUG: Extraction complete. Found %d unique params. Saving to file...", len(allParams))
+
 		// 4. Save discovered parameters to params.txt
 		paramsFile := filepath.Join(dir, "params.txt")
 		err = writeLinesToFile(paramsFile, mapKeysToSlice(allParams))
@@ -215,9 +242,12 @@ func processParameterDiscovery(inputChan <-chan string, wordlistPath string) {
 			continue
 		}
 
-		logger.Success("Discovered %d unique parameters for %s (Fetched %d pages). Saved to %s", len(allParams), domain, fetchedCount, paramsFile)
+		logger.Success("Discovered %d unique parameters for %s (Fetched %d pages, Failed %d). Saved to %s", len(allParams), domain, fetchedCount, failedCount, paramsFile)
 	}
+	logger.Info("DEBUG: processParameterDiscovery loop finished.")
 }
+
+// ... [Keep processPipeline, filterExistingDomains, initDomainFiles, sanitizeDomain, getInputChannel, readFile, readStdin, readLinesFromFile, writeLinesToFile, mapKeysToSlice EXACTLY as they were in the previous full file] ...
 
 func processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
 	logger.Info("Processing URLs...")
