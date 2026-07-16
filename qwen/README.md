@@ -1,2 +1,0 @@
-# cexss
-xss fuzzer tool
