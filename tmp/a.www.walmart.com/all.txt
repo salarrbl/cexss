@@ -1,0 +1,3 @@
+https://a.www.walmart.com
+https://a.www.walmart.com/analytics
+https://a.www.walmart.com/robots.txt

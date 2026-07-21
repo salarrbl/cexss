@@ -35,14 +35,14 @@ func Parse() *Config {
 		OutputDir:     "tmp",
 	}
 
-	flag.BoolVar(&cfg.CollectURLs, "uc", false, "URL Collection mode (Wayback + Katana)")
+	flag.BoolVar(&cfg.CollectURLs, "uc", false, "URL Collection mode (GAU + Katana)")
 	flag.BoolVar(&cfg.FilterURLs, "fu", false, "Filter static resources from URLs")
 	flag.BoolVar(&cfg.ParamSearch, "ps", false, "Discover & rank parameters")
 	flag.BoolVar(&cfg.URLGen, "ug", false, "Generate test URLs for XSS fuzzing")
 	flag.BoolVar(&cfg.RunNuclei, "nuclei", false, "Run Nuclei scan on generated URLs")
 
 	flag.StringVar(&cfg.Strategy, "strategy", "normal", "Strategy: normal, combine, ignore, all")
-	flag.StringVar(&cfg.StrategyValue, "strategy_value", "replace", "Mutation mode: replace, suffix")
+	flag.StringVar(&cfg.StrategyValue, "strategy_value", "replace", "Mutation mode: replace, suffix, prefix")
 	flag.StringVar(&cfg.TemplatePath, "t", "payloads/detect-Cexss.yaml", "Path to Nuclei template")
 	flag.StringVar(&cfg.TargetFile, "f", "", "File containing targets (one per line)")
 
@@ -53,28 +53,60 @@ func Parse() *Config {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `  cexss — Advanced XSS Automation v2
 
-  MODES:
-    -uc        Collect URLs from Wayback Machine + Katana crawler
+  TARGET INPUT (accepts all formats):
+    cexss [flags] example.com
+    cexss [flags] https://example.com/path?q=1
+    cexss [flags] -f targets.txt
+    cat domains.txt | cexss [flags] -
+
+  PIPELINE (domain-by-domain, per domain):
+    Katana ─┐
+             ├─ Merge → Dedup → Filter → Params → Encode Check → Generate → Nuclei
+    GAU ────┘
+
+  MODES (combine any):
+    -uc        Collect URLs from GAU (GetAllURLs) + Katana crawler
     -fu        Filter out static assets (images, CSS, JS, fonts, etc.)
-    -ps        Discover parameters from URLs and wordlists, rank by frequency
-    -ug        Generate mutated URLs with XSS payloads for every parameter
-    -nuclei    Pipe generated URLs through Nuclei scanner
+    -ps        Discover & rank parameters from URLs + wordlists
+    -ug        Generate XSS test URLs with payloads for every parameter
+    -nuclei    Run Nuclei scanner on generated URLs
+
+  STRATEGIES (-strategy):
+    normal    Only use parameters already in the URL     (default)
+    combine   URL params + wordlist params combined
+    ignore    Strip URL params, use wordlist params only
+    all       Run normal + combine + ignore (most coverage)
+
+  MUTATIONS (-strategy_value):
+    replace   Replace param value with payload            (default)
+    suffix    Append payload to existing param value
+    prefix    Prepend payload before existing param value
 
   SETTINGS:
-    -strategy       normal | combine | ignore | all       (default: normal)
-    -strategy_value replace | suffix                      (default: replace)
-    -t              Path to Nuclei YAML template          (default: payloads/detect-Cexss.yaml)
-    -f              File with target domains/URLs
-    -c              Number of concurrent workers          (default: 20)
-    -mp             Max parameters per generated URL      (default: 25)
-    -v              Enable verbose debug output
+    -t string     Nuclei YAML template path               (default: payloads/detect-Cexss.yaml)
+    -f string     File with targets (one per line)
+    -c int        Concurrency level                        (default: 20)
+    -mp int       Max parameters per generated URL chunk   (default: 25)
+    -v            Verbose debug output
 
   EXAMPLES:
-    cexss -uc example.com                              Collect URLs only
-    cexss -uc -fu -ps -ug example.com                  Full pipeline: collect → filter → params → generate
-    cexss -uc -fu -ps -ug -nuclei example.com          Full pipeline + Nuclei scan
-    cexss -ug -f targets.txt                           Generate URLs for multiple targets
-    cexss -ug -strategy combine -strategy_value suffix example.com
+    cexss -uc example.com
+      Collect URLs only (GAU + Katana)
+
+    cexss -uc -fu -ps -ug example.com
+      Full pipeline: collect → filter → params → generate
+
+    cexss -uc -fu -ps -ug -nuclei example.com
+      Full pipeline with Nuclei scanning
+
+    cexss -uc -fu -ps -ug -f domains.txt
+      Full pipeline for multiple targets from file
+
+    cexss -ug -strategy all -strategy_value prefix example.com
+      Max coverage: all strategies, prefix mutation
+
+    cexss -ug -f targets.txt
+      Generate URLs from existing collected data (rerun)
 `)
 	}
 

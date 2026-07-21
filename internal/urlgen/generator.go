@@ -46,6 +46,7 @@ func (g *Generator) Generate(baseURL string, existingParams []string, allParams 
 	}
 
 	chunks := chunkSlice(paramsToTest, g.MaxParams)
+	seen := make(map[string]bool)
 
 	for _, payload := range g.Payloads {
 		for _, chunk := range chunks {
@@ -58,11 +59,31 @@ func (g *Generator) Generate(baseURL string, existingParams []string, allParams 
 			}
 
 			u.RawQuery = q.Encode()
-			generated = append(generated, u.String())
+			genURL := u.String()
+
+			dedupKey := hostPathKey(u) + paramKey(chunk)
+			if seen[dedupKey] {
+				continue
+			}
+			seen[dedupKey] = true
+
+			generated = append(generated, genURL)
 		}
 	}
 
 	return generated
+}
+
+func hostPathKey(u *url.URL) string {
+	return u.Host + u.Path
+}
+
+func paramKey(params []string) string {
+	var key string
+	for _, p := range params {
+		key += ":" + p
+	}
+	return key
 }
 
 func (g *Generator) selectParams(u *url.URL, existingParams, allParams []string, strategy string) []string {
@@ -115,4 +136,12 @@ func GetExistingParams(rawURL string) []string {
 		params = append(params, key)
 	}
 	return params
+}
+
+func GetParamValue(rawURL, name string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get(name)
 }

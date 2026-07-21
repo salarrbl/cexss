@@ -2,7 +2,7 @@ package collector
 
 import (
 	"bufio"
-	// REMOVED: "fmt" because we are using logger instead
+	"context"
 	"os/exec"
 	"strings"
 
@@ -15,22 +15,35 @@ func NewKatanaCollector() *KatanaCollector {
 	return &KatanaCollector{}
 }
 
-func (k *KatanaCollector) Fetch(target string, out chan<- CollectedURL) error {
+func (k *KatanaCollector) Fetch(ctx context.Context, target string, out chan<- CollectedURL) error {
 	targetURL := target
 	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		targetURL = "https://" + targetURL
 	}
 
-	cmd := exec.Command("katana", "-u", targetURL, "-silent")
+	cmd := exec.CommandContext(ctx, "katana", "-u", targetURL, "-silent")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		logger.Error("Katana failed for %s: pipe error", target)
 		return err
 	}
 
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "error") {
+				logger.Warning("Katana stderr: %s", line)
+			}
+		}
+	}()
+
 	if err := cmd.Start(); err != nil {
-		logger.Error("Katana failed for %s: %v", target, err)
+		logger.Warning("Katana failed for %s: %v", target, err)
 		return err
 	}
 
@@ -49,10 +62,11 @@ func (k *KatanaCollector) Fetch(target string, out chan<- CollectedURL) error {
 	}
 
 	if err := cmd.Wait(); err != nil {
-		logger.Error("Katana failed for %s: process error", target)
 		return err
 	}
 
-	logger.Success("Katana done for %s (%d URLs)", target, count)
+	if count > 0 {
+		logger.Success("Katana done for %s (%d URLs)", target, count)
+	}
 	return nil
 }

@@ -2,21 +2,25 @@ package app
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/salarrbl/cexss/internal/collector"
 	"github.com/salarrbl/cexss/internal/config"
+	"github.com/salarrbl/cexss/internal/encoding"
 	"github.com/salarrbl/cexss/internal/input"
 	"github.com/salarrbl/cexss/internal/mutation"
 	"github.com/salarrbl/cexss/internal/normalize"
 	"github.com/salarrbl/cexss/internal/param"
-	"github.com/salarrbl/cexss/internal/scheduler"
+	"github.com/salarrbl/cexss/internal/progress"
 	"github.com/salarrbl/cexss/internal/urlgen"
 	"github.com/salarrbl/cexss/pkg/filter"
 	"github.com/salarrbl/cexss/pkg/logger"
@@ -28,7 +32,7 @@ type App struct {
 }
 
 type domainWriter struct {
-	wayback  *os.File
+	gau      *os.File
 	katana   *os.File
 	all      *os.File
 	filtered *os.File
@@ -56,7 +60,7 @@ func (a *App) Run() error {
 
 	switch {
 	case a.cfg.CollectURLs:
-		return a.runCollection()
+		return a.runPipeline()
 	case a.cfg.FilterURLs:
 		return a.runFilterExisting()
 	case a.cfg.ParamSearch:
@@ -74,7 +78,7 @@ func (a *App) Run() error {
 }
 
 // ============================================================================
-// Mode: Default (URLs from args → filter → save)
+// Mode: Default (URLs from args -> filter -> save)
 // ============================================================================
 
 func (a *App) runDefault() error {
@@ -90,66 +94,374 @@ func (a *App) runDefault() error {
 }
 
 // ============================================================================
-// Mode: Collection (-uc)
+// Pipeline: Domain-by-domain full processing
 // ============================================================================
 
-func (a *App) runCollection() error {
-	logger.Info("Starting URL collection for %d target(s)...", len(a.targets))
+func (a *App) runPipeline() error {
+	rep := progress.New()
+	hasSubStages := a.cfg.ParamSearch || a.cfg.URLGen || a.cfg.RunNuclei
 
-	urlChan := make(chan collector.CollectedURL, 2000)
-	runner := scheduler.NewRunner(a.cfg.Concurrency)
-
-	seen := map[string]struct{}{}
-	for _, target := range a.targets {
-		if _, ok := seen[target]; ok {
-			continue
+	for i, target := range a.targets {
+		rep.StartDomain(i+1, len(a.targets), target)
+		err := a.processDomain(rep, target, hasSubStages)
+		if err != nil {
+			rep.DomainFailed(err)
+			logger.Warning("Domain '%s' had errors, continuing to next...", target)
+		} else {
+			rep.DomainDone()
 		}
-		seen[target] = struct{}{}
-		t := target
-
-		runner.Go(func() {
-			if err := collector.NewWaybackCollector().Fetch(t, urlChan); err != nil {
-				if a.cfg.Verbose {
-					logger.Warning("Wayback error for %s: %v", t, err)
-				}
-			}
-		})
-
-		runner.Go(func() {
-			if err := collector.NewKatanaCollector().Fetch(t, urlChan); err != nil {
-				if a.cfg.Verbose {
-					logger.Warning("Katana error for %s: %v", t, err)
-				}
-			}
-		})
+		rep.Separator()
 	}
 
+	rep.Summary()
+	return nil
+}
+
+func (a *App) processDomain(rep *progress.Reporter, domain string, hasSubStages bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	safeDir := filepath.Join(a.cfg.OutputDir, normalize.SafeFilename(domain))
+	os.MkdirAll(safeDir, 0755)
+
+	// Stages 1-2: Collection from Katana + GAU
+	urlChan := make(chan collector.CollectedURL, 2000)
+	var collectWg sync.WaitGroup
+	var katanaErr, gauErr error
+
+	collectWg.Add(1)
 	go func() {
-		runner.Wait()
-		close(urlChan)
+		defer collectWg.Done()
+		rep.StageStart(progress.StageKatana)
+		katanaCol := collector.NewKatanaCollector()
+		if err := katanaCol.Fetch(ctx, domain, urlChan); err != nil {
+			katanaErr = err
+			rep.StageFailed(progress.StageKatana, err)
+			return
+		}
+		rep.StageDone(progress.StageKatana)
 	}()
 
-	a.processPipeline(urlChan, a.cfg.FilterURLs)
+	collectWg.Add(1)
+	go func() {
+		defer collectWg.Done()
+		rep.StageStart(progress.StageGAU)
+		gauCol := collector.NewGAUCollector()
+		if err := gauCol.Fetch(ctx, domain, urlChan); err != nil {
+			gauErr = err
+			rep.StageFailed(progress.StageGAU, err)
+			return
+		}
+		rep.StageDone(progress.StageGAU)
+	}()
 
-	if a.cfg.ParamSearch {
-		a.runParamDiscovery()
+	// Stage 3-4: Merge, deduplicate, filter, and save in real-time
+	filteredOut, err := os.Create(filepath.Join(safeDir, "filtered.txt"))
+	if err != nil {
+		return fmt.Errorf("create filtered.txt: %w", err)
 	}
+	allOut, err := os.Create(filepath.Join(safeDir, "all.txt"))
+	if err != nil {
+		filteredOut.Close()
+		return fmt.Errorf("create all.txt: %w", err)
+	}
+
+	rep.StageStart(progress.StageMerge)
+	rep.StageStart(progress.StageFilter)
+
+	seenAll := map[string]struct{}{}
+	seenFiltered := map[string]struct{}{}
+	total, filtered, saved := 0, 0, 0
+
+	closeCollectors := make(chan struct{})
+	go func() {
+		collectWg.Wait()
+		close(urlChan)
+		close(closeCollectors)
+	}()
+
+	for res := range urlChan {
+		url := strings.TrimSpace(res.URL)
+		if url == "" {
+			continue
+		}
+		total++
+
+		url = normalize.EnsureScheme(url)
+
+		if _, exists := seenAll[url]; !exists {
+			seenAll[url] = struct{}{}
+			fmt.Fprintln(allOut, url)
+		}
+
+		if a.cfg.FilterURLs && filter.IsStaticResource(url) {
+			filtered++
+			continue
+		}
+
+		if _, exists := seenFiltered[url]; exists {
+			continue
+		}
+		seenFiltered[url] = struct{}{}
+		saved++
+		fmt.Fprintln(filteredOut, url)
+	}
+
+	allOut.Close()
+	filteredOut.Close()
+
+	rep.StageDone(progress.StageMerge, fmt.Sprintf("%d total", total))
+	if a.cfg.FilterURLs {
+		rep.StageDone(progress.StageFilter, fmt.Sprintf("%d unique", saved))
+	} else {
+		rep.StageSkipped(progress.StageFilter)
+	}
+
+	logger.Info("Domain '%s': %d URLs collected, %d filtered, %d saved unique", domain, total, filtered, saved)
+
+	if katanaErr != nil && gauErr != nil {
+		return fmt.Errorf("both collectors failed: katana: %v, gau: %v", katanaErr, gauErr)
+	}
+
+	if !hasSubStages {
+		return nil
+	}
+
+	// Stage 5: Parameter extraction
+	rep.StageStart(progress.StageParams)
+	if err := a.extractParamsForDomain(domain, safeDir); err != nil {
+		rep.StageFailed(progress.StageParams, err)
+		logger.Warning("Parameter extraction failed for %s: %v", domain, err)
+	} else {
+		rep.StageDone(progress.StageParams)
+	}
+
+	// Stage 6: Encoded parameter verification
+	rep.StageStart(progress.StageEncodeCheck)
+	encodedCount, err := a.verifyEncodedParams(domain, safeDir)
+	if err != nil {
+		rep.StageFailed(progress.StageEncodeCheck, err)
+		logger.Warning("Encoded parameter verification failed for %s: %v", domain, err)
+	} else {
+		extra := fmt.Sprintf("%d encoded", encodedCount)
+		rep.StageDone(progress.StageEncodeCheck, extra)
+	}
+
+	// Stage 7: URL generation
 	if a.cfg.URLGen {
+		rep.StageStart(progress.StageURLGen)
 		payloads := a.loadPayloads()
 		if len(payloads) == 0 {
 			payloads = []string{"cexss"}
 		}
-		a.runURLGeneration(payloads)
+		if err := a.generateURLsForDomain(domain, safeDir, payloads); err != nil {
+			rep.StageFailed(progress.StageURLGen, err)
+			logger.Warning("URL generation failed for %s: %v", domain, err)
+		} else {
+			rep.StageDone(progress.StageURLGen)
+		}
 	}
+
+	// Stage 8: Nuclei scan
 	if a.cfg.RunNuclei && a.cfg.URLGen {
-		a.runNuclei()
+		rep.StageStart(progress.StageNuclei)
+		if err := a.runNucleiOnDomain(domain, safeDir); err != nil {
+			rep.StageFailed(progress.StageNuclei, err)
+			logger.Warning("Nuclei scan failed for %s: %v", domain, err)
+		} else {
+			rep.StageDone(progress.StageNuclei)
+		}
+	} else if a.cfg.RunNuclei {
+		logger.Warning("Nuclei requires -ug flag, skipping for %s", domain)
 	}
+
+	rep.StageDone(progress.StageSave)
 
 	return nil
 }
 
 // ============================================================================
-// Pipeline: writes URLs to per-domain files
+// Pipeline helpers
+// ============================================================================
+
+func (a *App) extractParamsForDomain(domain, safeDir string) error {
+	discoverer := param.NewDiscoverer()
+	wordlistParams := a.loadWordlists()
+	logger.Info("Loaded %d parameters from wordlists", len(wordlistParams))
+
+	filteredFile := filepath.Join(safeDir, "filtered.txt")
+	urls, err := input.ReadLines(filteredFile)
+	if err != nil {
+		urls, err = input.ReadLines(filepath.Join(safeDir, "all.txt"))
+		if err != nil {
+			return fmt.Errorf("no URL files found: %w", err)
+		}
+	}
+
+	paramFreq := map[string]int{}
+	for _, u := range urls {
+		u = normalize.EnsureScheme(u)
+		for _, p := range discoverer.ExtractFromURL(u) {
+			paramFreq[p]++
+		}
+	}
+
+	for _, wp := range wordlistParams {
+		if _, exists := paramFreq[wp]; !exists {
+			paramFreq[wp] = 0
+		}
+	}
+
+	sorted := sortParams(paramFreq)
+	paramsFile := filepath.Join(safeDir, "params.txt")
+	a.writeParamsFile(paramsFile, sorted)
+
+	topN := 5
+	if len(sorted) < topN {
+		topN = len(sorted)
+	}
+	topList := make([]string, topN)
+	for i := 0; i < topN; i++ {
+		topList[i] = fmt.Sprintf("%s(%d)", sorted[i].Name, sorted[i].Count)
+	}
+
+	logger.Success("%s: %d params | Top: %s", domain, len(sorted), strings.Join(topList, " "))
+	return nil
+}
+
+func (a *App) verifyEncodedParams(domain, safeDir string) (int, error) {
+	paramsFile := filepath.Join(safeDir, "params.txt")
+	params, err := input.ReadLines(paramsFile)
+	if err != nil {
+		return 0, fmt.Errorf("read params.txt: %w", err)
+	}
+
+	filteredFile := filepath.Join(safeDir, "filtered.txt")
+	urls, err := input.ReadLines(filteredFile)
+	if err != nil {
+		return 0, fmt.Errorf("read filtered.txt: %w", err)
+	}
+
+	detector := encoding.NewDetector()
+	var allResults []encoding.Result
+
+	paramSet := make(map[string]bool, len(params))
+	for _, p := range params {
+		paramSet[p] = true
+	}
+
+	for _, u := range urls {
+		for paramName := range paramSet {
+			val := urlgen.GetParamValue(u, paramName)
+			if val == "" {
+				continue
+			}
+			results := detector.Detect(paramName, val)
+			allResults = append(allResults, results...)
+		}
+	}
+
+	if len(allResults) > 0 {
+		encFile := filepath.Join(safeDir, "encoded_params.txt")
+		f, err := os.Create(encFile)
+		if err != nil {
+			return 0, fmt.Errorf("create encoded_params.txt: %w", err)
+		}
+		defer f.Close()
+
+		seen := map[string]bool{}
+		for _, r := range allResults {
+			key := r.Param + "|" + r.Decoded
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			fmt.Fprintf(f, "param=%s | encoding=%s | original=%s | decoded=%s\n", r.Param, r.Encoding, r.Value, r.Decoded)
+		}
+
+		logger.Success("%s: %d encoded parameters verified -> %s", domain, len(seen), encFile)
+		return len(seen), nil
+	}
+
+	logger.Info("%s: No encoded parameters found", domain)
+	return 0, nil
+}
+
+func (a *App) generateURLsForDomain(domain, safeDir string, payloads []string) error {
+	mutator := mutation.New(a.cfg.StrategyValue)
+	logger.Info("Generating URLs for %s (strategy=%s mutation=%s)...", domain, a.cfg.Strategy, a.cfg.StrategyValue)
+
+	urls, err := input.ReadLines(filepath.Join(safeDir, "filtered.txt"))
+	if err != nil {
+		return fmt.Errorf("read filtered.txt: %w", err)
+	}
+
+	allParams, err := input.ReadLines(filepath.Join(safeDir, "params.txt"))
+	if err != nil {
+		return fmt.Errorf("read params.txt: %w", err)
+	}
+
+	generator := urlgen.NewGenerator(a.cfg.MaxParams, payloads, mutator)
+
+	xamirPath := filepath.Join(safeDir, "xamir.txt")
+	out, err := os.Create(xamirPath)
+	if err != nil {
+		return fmt.Errorf("create xamir.txt: %w", err)
+	}
+	defer out.Close()
+
+	domainGenerated := 0
+	for _, u := range urls {
+		u = normalize.EnsureScheme(u)
+		existingParams := urlgen.GetExistingParams(u)
+		generated := generator.Generate(u, existingParams, allParams, a.cfg.Strategy)
+
+		for _, gen := range generated {
+			fmt.Fprintln(out, gen)
+			domainGenerated++
+		}
+	}
+
+	logger.Success("%s: %d URLs generated -> %s", domain, domainGenerated, xamirPath)
+	return nil
+}
+
+func (a *App) runNucleiOnDomain(domain, safeDir string) error {
+	xamirPath := filepath.Join(safeDir, "xamir.txt")
+	if _, err := os.Stat(xamirPath); os.IsNotExist(err) {
+		return fmt.Errorf("xamir.txt not found, run URL generation first")
+	}
+
+	if _, err := os.Stat(a.cfg.TemplatePath); os.IsNotExist(err) {
+		return fmt.Errorf("nuclei template not found: %s", a.cfg.TemplatePath)
+	}
+
+	resultsPath := filepath.Join(safeDir, "nuclei_results.txt")
+	outFile, err := os.Create(resultsPath)
+	if err != nil {
+		return fmt.Errorf("create nuclei_results.txt: %w", err)
+	}
+	defer outFile.Close()
+
+	logger.Info("Starting Nuclei scan for %s with template: %s", domain, a.cfg.TemplatePath)
+
+	cmd := exec.Command("nuclei", "-l", xamirPath, "-t", a.cfg.TemplatePath, "-silent")
+	cmd.Stdout = io.MultiWriter(os.Stdout, outFile)
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start nuclei: %w", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("nuclei exited with error: %w", err)
+	}
+
+	logger.Success("Nuclei scan completed for %s -> %s", domain, resultsPath)
+	return nil
+}
+
+// ============================================================================
+// Pipeline: writes URLs to per-domain files (shared by runDefault and domain pipeline)
 // ============================================================================
 
 func (a *App) processPipeline(urlChan <-chan collector.CollectedURL, shouldFilter bool) {
@@ -179,9 +491,9 @@ func (a *App) processPipeline(urlChan <-chan collector.CollectedURL, shouldFilte
 		}
 
 		switch res.Source {
-		case "wayback":
-			if dw.wayback != nil {
-				fmt.Fprintln(dw.wayback, url)
+		case "gau", "wayback":
+			if dw.gau != nil {
+				fmt.Fprintln(dw.gau, url)
 			}
 		case "katana":
 			if dw.katana != nil {
@@ -211,8 +523,8 @@ func (a *App) processPipeline(urlChan <-chan collector.CollectedURL, shouldFilte
 	}
 
 	for _, dw := range writers {
-		if dw.wayback != nil {
-			dw.wayback.Close()
+		if dw.gau != nil {
+			dw.gau.Close()
 		}
 		if dw.katana != nil {
 			dw.katana.Close()
@@ -233,7 +545,7 @@ func (a *App) initDomainFiles(domain string) *domainWriter {
 	dir := filepath.Join(a.cfg.OutputDir, domain)
 	os.MkdirAll(dir, 0755)
 	return &domainWriter{
-		wayback:  a.createFile(filepath.Join(dir, "wayback.txt")),
+		gau:      a.createFile(filepath.Join(dir, "gau.txt")),
 		katana:   a.createFile(filepath.Join(dir, "katana.txt")),
 		all:      a.createFile(filepath.Join(dir, "all.txt")),
 		filtered: a.createFile(filepath.Join(dir, "filtered.txt")),
@@ -302,13 +614,13 @@ func (a *App) runFilterExisting() error {
 
 		in.Close()
 		out.Close()
-		logger.Success("%s: %d total → %d valid URLs", domain, total, kept)
+		logger.Success("%s: %d total -> %d valid URLs", domain, total, kept)
 	}
 	return nil
 }
 
 // ============================================================================
-// Mode: Parameter Discovery (-ps)
+// Mode: Parameter Discovery (-ps standalone)
 // ============================================================================
 
 func (a *App) runParamDiscovery() error {
@@ -375,14 +687,14 @@ func (a *App) runParamDiscovery() error {
 		sorted := sortParams(globalParams)
 		globalFile := filepath.Join(a.cfg.OutputDir, "global_params.txt")
 		a.writeParamsFile(globalFile, sorted)
-		logger.Success("Global params: %d → %s", len(sorted), globalFile)
+		logger.Success("Global params: %d -> %s", len(sorted), globalFile)
 	}
 
 	return nil
 }
 
 // ============================================================================
-// Mode: URL Generation (-ug)
+// Mode: URL Generation (-ug standalone)
 // ============================================================================
 
 func (a *App) runURLGeneration(payloads []string) error {
@@ -431,7 +743,7 @@ func (a *App) runURLGeneration(payloads []string) error {
 		}
 		out.Close()
 
-		logger.Success("%s: %d URLs generated → %s", domain, domainGenerated, xamirPath)
+		logger.Success("%s: %d URLs generated -> %s", domain, domainGenerated, xamirPath)
 		totalGenerated += domainGenerated
 	}
 
@@ -445,7 +757,7 @@ func (a *App) runURLGeneration(payloads []string) error {
 }
 
 // ============================================================================
-// Nuclei integration
+// Nuclei integration (standalone, after -ug)
 // ============================================================================
 
 func (a *App) runNuclei() {
@@ -469,6 +781,14 @@ func (a *App) runNuclei() {
 		return
 	}
 
+	resultsPath := filepath.Join(a.cfg.OutputDir, "nuclei_results.txt")
+	outFile, err := os.Create(resultsPath)
+	if err != nil {
+		logger.Error("Could not create nuclei_results.txt: %v", err)
+		return
+	}
+	defer outFile.Close()
+
 	tmpFile, err := os.CreateTemp("", "cexss-nuclei-*.txt")
 	if err != nil {
 		logger.Error("Could not create temp file: %v", err)
@@ -489,7 +809,7 @@ func (a *App) runNuclei() {
 	logger.Info("Prepared %d URLs for Nuclei scan", total)
 
 	cmd := exec.Command("nuclei", "-l", tmpPath, "-t", a.cfg.TemplatePath, "-silent")
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = io.MultiWriter(os.Stdout, outFile)
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
@@ -499,7 +819,7 @@ func (a *App) runNuclei() {
 	if err := cmd.Wait(); err != nil {
 		logger.Error("Nuclei exited with error: %v", err)
 	} else {
-		logger.Success("Nuclei scan completed")
+		logger.Success("Nuclei scan completed -> %s", resultsPath)
 	}
 }
 
@@ -513,13 +833,14 @@ func (a *App) loadPayloads() []string {
 		logger.Warning("Could not load payloads/payloads.txt: %v", err)
 		return []string{"cexss"}
 	}
-	for i, line := range lines {
-		if strings.HasPrefix(line, "#") {
-			lines = append(lines[:i], lines[i+1:]...)
+	var filtered []string
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "#") {
+			filtered = append(filtered, line)
 		}
 	}
-	logger.Info("Loaded %d custom payloads", len(lines))
-	return lines
+	logger.Info("Loaded %d custom payloads", len(filtered))
+	return filtered
 }
 
 func (a *App) loadWordlists() []string {
@@ -572,7 +893,6 @@ func sortParams(m map[string]int) []paramCount {
 	return sorted
 }
 
-// domainFromFiles returns the list of domains that have collected data.
 func (a *App) domainFromFiles() []string {
 	var domains []string
 	seen := map[string]struct{}{}
